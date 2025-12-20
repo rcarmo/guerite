@@ -43,8 +43,7 @@ docker run --rm \
 Set environment variables to adjust behavior:
 
 - `DOCKER_HOST` (default `unix://var/run/docker.sock`): Docker endpoint to use.
-- `GUERITE_MONITOR_LABEL` (default `guerite.monitor`): Label key whose presence marks containers to watch (value is ignored).
-- `GUERITE_CRON_LABEL` (default `guerite.cron`): Label key containing cron expressions for per-container schedules.
+- `GUERITE_CRON_LABEL` (default `guerite.cron`): Label key containing cron expressions; its presence marks containers to watch.
 - `GUERITE_TZ` (default `UTC`): Time zone used to evaluate cron expressions.
 - `GUERITE_DRY_RUN` (default `false`): If `true`, log actions without restarting containers.
 - `GUERITE_LOG_LEVEL` (default `INFO`): Log level (e.g., `DEBUG`, `INFO`).
@@ -55,8 +54,7 @@ Set environment variables to adjust behavior:
 
 Add labels to any container you want Guerite to manage:
 
-- `guerite.monitor` marks the container for monitoring (value is ignored).
-- `guerite.cron=*/10 * * * *` is required; containers without a cron label are ignored.
+- `guerite.cron=*/10 * * * *` is required; containers without this label are ignored. The presence of this label opts the container into monitoring.
 
 ## Quick start (local Docker socket)
 

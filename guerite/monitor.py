@@ -18,7 +18,7 @@ LOG = getLogger(__name__)
 
 def select_monitored_containers(client: DockerClient, settings: Settings) -> list[Container]:
     try:
-        return client.containers.list(filters={"label": settings.monitor_label})
+        return client.containers.list(filters={"label": settings.cron_label})
     except DockerException as error:
         LOG.error("Failed to list containers: %s", error)
         return []
@@ -125,9 +125,8 @@ def run_once(
     monitored = containers if containers is not None else select_monitored_containers(client, settings)
     for container in monitored:
         LOG.debug(
-            "%s labels monitor=%s cron=%s",
+            "%s cron=%s",
             container.name,
-            container.labels.get(settings.monitor_label),
             container.labels.get(settings.cron_label),
         )
         if not schedule_allows_run(container, settings, current_time):

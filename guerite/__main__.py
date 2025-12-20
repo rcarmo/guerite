@@ -23,7 +23,7 @@ def is_monitored_event(event: dict, settings: Settings) -> bool:
     if event.get("Type") != "container":
         return False
     attributes = event.get("Actor", {}).get("Attributes", {})
-    return settings.monitor_label in attributes
+    return settings.cron_label in attributes
 
 
 def start_event_listener(client: DockerClient, settings: Settings, wake_signal: Event) -> None:
