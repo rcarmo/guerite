@@ -1,6 +1,6 @@
 from datetime import datetime
 from logging import getLogger
-from typing import Iterable, Optional
+from typing import Optional
 
 from croniter import croniter
 from docker import DockerClient
@@ -40,12 +40,23 @@ def needs_update(container: Container, pulled_image: Image) -> bool:
         return False
 
 
+def current_image_id(container: Container) -> Optional[str]:
+    try:
+        return container.image.id
+    except DockerException as error:
+        LOG.warning("Could not read image ID for %s: %s", container.name, error)
+        return None
+
+
 def schedule_allows_run(container: Container, settings: Settings, timestamp: datetime) -> bool:
     cron_expression = container.labels.get(settings.cron_label)
     if cron_expression is None:
+        LOG.debug("%s has no cron label; running now", container.name)
         return True
     try:
-        return croniter.match(cron_expression, timestamp)
+        allowed = croniter.match(cron_expression, timestamp)
+        LOG.debug("%s cron %s at %s -> %s", container.name, cron_expression, timestamp.isoformat(), allowed)
+        return allowed
     except (ValueError, KeyError) as error:
         LOG.warning("Invalid cron expression on %s: %s", container.name, error)
         return False
@@ -92,9 +103,27 @@ def restart_container(client: DockerClient, container: Container, image_ref: str
         return False
 
 
+def remove_old_image(client: DockerClient, old_image_id: Optional[str], new_image_id: str) -> None:
+    if old_image_id is None or old_image_id == new_image_id:
+        return
+    try:
+        client.images.remove(image=old_image_id)
+        LOG.info("Removed old image %s", old_image_id)
+    except APIError as error:
+        LOG.debug("Could not remove old image %s: %s", old_image_id, error)
+    except DockerException as error:
+        LOG.debug("Could not remove old image %s: %s", old_image_id, error)
+
+
 def run_once(client: DockerClient, settings: Settings) -> None:
     timestamp = now_utc()
     for container in select_monitored_containers(client, settings):
+        LOG.debug(
+            "%s labels monitor=%s cron=%s",
+            container.name,
+            container.labels.get(settings.monitor_label),
+            container.labels.get(settings.cron_label),
+        )
         if not schedule_allows_run(container, settings, timestamp):
             LOG.debug("Skipping %s; not scheduled at this time", container.name)
             continue
@@ -103,6 +132,8 @@ def run_once(client: DockerClient, settings: Settings) -> None:
         if image_ref is None:
             LOG.warning("Skipping %s; missing image reference", container.name)
             continue
+
+        old_image_id = current_image_id(container)
 
         pulled_image = pull_image(client, image_ref)
         if pulled_image is None:
@@ -118,4 +149,5 @@ def run_once(client: DockerClient, settings: Settings) -> None:
             continue
 
         if restart_container(client, container, image_ref):
+            remove_old_image(client, old_image_id, pulled_image.id)
             notify_pushover(settings, "Guerite", f"Updated {container.name} with {image_ref}")
