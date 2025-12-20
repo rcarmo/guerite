@@ -1,4 +1,5 @@
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 from logging import basicConfig, getLogger
 from typing import Optional
 
@@ -12,6 +13,13 @@ def configure_logging(level: str) -> None:
 
 def now_utc() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def now_tz(tz_name: str) -> datetime:
+    try:
+        return datetime.now(ZoneInfo(tz_name))
+    except Exception:
+        return datetime.now(timezone.utc)
 
 
 def safe_get(mapping: dict, key: str, default: Optional[str] = None) -> Optional[str]:

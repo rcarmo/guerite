@@ -3,21 +3,19 @@ from os import getenv
 from typing import Optional
 
 DEFAULT_MONITOR_LABEL = "guerite.monitor"
-DEFAULT_MONITOR_VALUE = "true"
 DEFAULT_CRON_LABEL = "guerite.cron"
-DEFAULT_POLL_INTERVAL = 600
 DEFAULT_DOCKER_HOST = "unix://var/run/docker.sock"
 DEFAULT_PUSHOOVER_API = "https://api.pushover.net/1/messages.json"
 DEFAULT_LOG_LEVEL = "INFO"
+DEFAULT_TZ = "UTC"
 
 
 @dataclass(frozen=True)
 class Settings:
     docker_host: str
     monitor_label: str
-    monitor_value: str
     cron_label: str
-    poll_interval: int
+    timezone: str
     pushover_token: Optional[str]
     pushover_user: Optional[str]
     pushover_api: str
@@ -29,9 +27,8 @@ def load_settings() -> Settings:
     return Settings(
         docker_host=getenv("DOCKER_HOST", DEFAULT_DOCKER_HOST),
         monitor_label=getenv("GUERITE_MONITOR_LABEL", DEFAULT_MONITOR_LABEL),
-        monitor_value=getenv("GUERITE_MONITOR_VALUE", DEFAULT_MONITOR_VALUE),
         cron_label=getenv("GUERITE_CRON_LABEL", DEFAULT_CRON_LABEL),
-        poll_interval=_env_int("GUERITE_POLL_INTERVAL", DEFAULT_POLL_INTERVAL),
+        timezone=getenv("GUERITE_TZ", DEFAULT_TZ),
         pushover_token=getenv("GUERITE_PUSHOVER_TOKEN"),
         pushover_user=getenv("GUERITE_PUSHOVER_USER"),
         pushover_api=getenv("GUERITE_PUSHOVER_API", DEFAULT_PUSHOOVER_API),

@@ -1,4 +1,5 @@
 from datetime import datetime
+from datetime import timedelta
 from logging import getLogger
 from typing import Optional
 
@@ -16,9 +17,8 @@ LOG = getLogger(__name__)
 
 
 def select_monitored_containers(client: DockerClient, settings: Settings) -> list[Container]:
-    label_filter = f"{settings.monitor_label}={settings.monitor_value}"
     try:
-        return client.containers.list(filters={"label": label_filter})
+        return client.containers.list(filters={"label": settings.monitor_label})
     except DockerException as error:
         LOG.error("Failed to list containers: %s", error)
         return []
@@ -51,8 +51,8 @@ def current_image_id(container: Container) -> Optional[str]:
 def schedule_allows_run(container: Container, settings: Settings, timestamp: datetime) -> bool:
     cron_expression = container.labels.get(settings.cron_label)
     if cron_expression is None:
-        LOG.debug("%s has no cron label; running now", container.name)
-        return True
+        LOG.debug("%s has no cron label; skipping", container.name)
+        return False
     try:
         allowed = croniter.match(cron_expression, timestamp)
         LOG.debug("%s cron %s at %s -> %s", container.name, cron_expression, timestamp.isoformat(), allowed)
@@ -115,16 +115,22 @@ def remove_old_image(client: DockerClient, old_image_id: Optional[str], new_imag
         LOG.debug("Could not remove old image %s: %s", old_image_id, error)
 
 
-def run_once(client: DockerClient, settings: Settings) -> None:
-    timestamp = now_utc()
-    for container in select_monitored_containers(client, settings):
+def run_once(
+    client: DockerClient,
+    settings: Settings,
+    timestamp: Optional[datetime] = None,
+    containers: Optional[list[Container]] = None,
+) -> None:
+    current_time = timestamp or now_utc()
+    monitored = containers if containers is not None else select_monitored_containers(client, settings)
+    for container in monitored:
         LOG.debug(
             "%s labels monitor=%s cron=%s",
             container.name,
             container.labels.get(settings.monitor_label),
             container.labels.get(settings.cron_label),
         )
-        if not schedule_allows_run(container, settings, timestamp):
+        if not schedule_allows_run(container, settings, current_time):
             LOG.debug("Skipping %s; not scheduled at this time", container.name)
             continue
 
@@ -151,3 +157,24 @@ def run_once(client: DockerClient, settings: Settings) -> None:
         if restart_container(client, container, image_ref):
             remove_old_image(client, old_image_id, pulled_image.id)
             notify_pushover(settings, "Guerite", f"Updated {container.name} with {image_ref}")
+
+
+def next_wakeup(containers: list[Container], settings: Settings, reference: datetime) -> datetime:
+    candidates: list[datetime] = []
+    for container in containers:
+        cron_expression = container.labels.get(settings.cron_label)
+        if cron_expression is None:
+            LOG.debug("%s has no cron; ignoring for scheduling", container.name)
+            continue
+
+        try:
+            next_time = croniter(cron_expression, reference, ret_type=datetime).get_next(datetime)
+            candidates.append(next_time)
+            LOG.debug("%s next due %s via cron %s", container.name, next_time.isoformat(), cron_expression)
+        except (ValueError, KeyError) as error:
+            LOG.warning("Invalid cron expression on %s: %s", container.name, error)
+
+    if not candidates:
+        return reference + timedelta(seconds=300)
+
+    return min(candidates)
