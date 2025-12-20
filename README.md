@@ -1,6 +1,8 @@
 # Guerite
 
-Guerite watches Docker containers that carry a specific label, pulls their base images when updates appear, and restarts the containers. It talks directly to the Docker API and can reach a local or remote daemon.
+> _A guerite is a small, enclosed structure used for temporary or makeshift purposes, while a [watchtower](https://github.com/containrrr/watchtower) is a tall, elevated structure used for permanent or sturdy purposes._
+
+Guerite is a [watchtower](https://github.com/containrrr/watchtower) alternative that watches Docker containers that carry a specific label, pulls their base images when updates appear, and restarts the containers. It talks directly to the Docker API and can reach a local or remote daemon.
 
 ## Requirements
 
