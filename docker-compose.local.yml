@@ -6,6 +6,8 @@ services:
     image: guerite:latest
     environment:
       GUERITE_LOG_LEVEL: INFO
+      GUERITE_WEBHOOK_URL: http://example.com/notify
+      GUERITE_NOTIFICATIONS: update,restart,health
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
     restart: unless-stopped

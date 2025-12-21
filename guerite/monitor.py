@@ -10,7 +10,7 @@ from docker.models.containers import Container
 from docker.models.images import Image
 
 from .config import Settings
-from .notifier import notify_pushover
+from .notifier import notify_pushover, notify_webhook
 from .utils import now_utc
 
 LOG = getLogger(__name__)
@@ -215,7 +215,9 @@ def run_once(
             if restart_container(client, container, image_ref):
                 remove_old_image(client, old_image_id, pulled_image.id)
                 if _should_notify(settings, "update"):
-                    notify_pushover(settings, "Guerite", f"Updated {container.name} with {image_ref}")
+                    message = f"Updated {container.name} with {image_ref}"
+                    notify_pushover(settings, "Guerite", message)
+                    notify_webhook(settings, "Guerite", message)
             continue
 
         if unhealthy_now and not _health_allowed(container.id, current_time, settings):
@@ -230,10 +232,13 @@ def run_once(
             if unhealthy_now:
                 _HEALTH_BACKOFF[container.id] = current_time + timedelta(seconds=settings.health_backoff_seconds)
                 if _should_notify(settings, "health") or _should_notify(settings, "health_check"):
-                    notify_pushover(settings, "Guerite", f"Restarted {container.name} after failed health check")
+                    message = f"Restarted {container.name} after failed health check"
+                    notify_pushover(settings, "Guerite", message)
+                    notify_webhook(settings, "Guerite", message)
             elif restart_due and _should_notify(settings, "restart"):
-                notify_pushover(settings, "Guerite", f"Restarted {container.name} (scheduled restart)")
-
+                message = f"Restarted {container.name} (scheduled restart)"
+                notify_pushover(settings, "Guerite", message)
+                notify_webhook(settings, "Guerite", message)
 
 def next_wakeup(containers: list[Container], settings: Settings, reference: datetime) -> datetime:
     candidates: list[datetime] = []

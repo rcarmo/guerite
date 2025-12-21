@@ -25,6 +25,7 @@ class Settings:
     pushover_token: Optional[str]
     pushover_user: Optional[str]
     pushover_api: str
+    webhook_url: Optional[str]
     dry_run: bool
     log_level: str
 
@@ -44,6 +45,7 @@ def load_settings() -> Settings:
         pushover_token=getenv("GUERITE_PUSHOVER_TOKEN"),
         pushover_user=getenv("GUERITE_PUSHOVER_USER"),
         pushover_api=getenv("GUERITE_PUSHOVER_API", DEFAULT_PUSHOOVER_API),
+        webhook_url=getenv("GUERITE_WEBHOOK_URL"),
         dry_run=_env_bool("GUERITE_DRY_RUN", False),
         log_level=getenv("GUERITE_LOG_LEVEL", DEFAULT_LOG_LEVEL).upper(),
     )
