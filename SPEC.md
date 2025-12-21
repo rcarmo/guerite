@@ -13,3 +13,4 @@ It is inspired by Watchtower but, like a Guerite (a small fortification), it aim
 - Containers to be monitored are identified by labels: `guerite.update` for image update checks, `guerite.restart` for scheduled restarts, and `guerite.health_check` for scheduled health checks that trigger restarts when the container is not `healthy` (rate-limited by a configurable backoff). The update/restart/health labels carry cron expressions (e.g., `guerite.update: "*/10 * * * *"`).
 - Watches for new containers that are started with the appropriate label.
 - Configurable via environment variables for Pushover integration.
+- Notifications can be enabled per event type (update/restart/health) via `GUERITE_NOTIFICATIONS`.

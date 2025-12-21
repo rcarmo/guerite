@@ -95,6 +95,10 @@ def _health_allowed(container_id: str, now: datetime, settings: Settings) -> boo
     return False
 
 
+def _should_notify(settings: Settings, event: str) -> bool:
+    return event in settings.notifications
+
+
 def restart_container(client: DockerClient, container: Container, image_ref: str) -> bool:
     config = container.attrs.get("Config", {})
     host_config = container.attrs.get("HostConfig")
@@ -210,7 +214,8 @@ def run_once(
                 continue
             if restart_container(client, container, image_ref):
                 remove_old_image(client, old_image_id, pulled_image.id)
-                notify_pushover(settings, "Guerite", f"Updated {container.name} with {image_ref}")
+                if _should_notify(settings, "update"):
+                    notify_pushover(settings, "Guerite", f"Updated {container.name} with {image_ref}")
             continue
 
         if unhealthy_now and not _health_allowed(container.id, current_time, settings):
@@ -224,6 +229,10 @@ def run_once(
         if restart_container(client, container, image_ref):
             if unhealthy_now:
                 _HEALTH_BACKOFF[container.id] = current_time + timedelta(seconds=settings.health_backoff_seconds)
+                if _should_notify(settings, "health") or _should_notify(settings, "health_check"):
+                    notify_pushover(settings, "Guerite", f"Restarted {container.name} after failed health check")
+            elif restart_due and _should_notify(settings, "restart"):
+                notify_pushover(settings, "Guerite", f"Restarted {container.name} (scheduled restart)")
 
 
 def next_wakeup(containers: list[Container], settings: Settings, reference: datetime) -> datetime:

@@ -1,11 +1,12 @@
 from dataclasses import dataclass
 from os import getenv
-from typing import Optional
+from typing import Optional, Set
 
 DEFAULT_UPDATE_LABEL = "guerite.update"
 DEFAULT_RESTART_LABEL = "guerite.restart"
 DEFAULT_HEALTH_LABEL = "guerite.health_check"
 DEFAULT_HEALTH_BACKOFF_SECONDS = 300
+DEFAULT_NOTIFICATIONS = "update"
 DEFAULT_DOCKER_HOST = "unix://var/run/docker.sock"
 DEFAULT_PUSHOOVER_API = "https://api.pushover.net/1/messages.json"
 DEFAULT_LOG_LEVEL = "INFO"
@@ -19,6 +20,7 @@ class Settings:
     restart_label: str
     health_label: str
     health_backoff_seconds: int
+    notifications: Set[str]
     timezone: str
     pushover_token: Optional[str]
     pushover_user: Optional[str]
@@ -37,6 +39,7 @@ def load_settings() -> Settings:
             "GUERITE_HEALTH_CHECK_BACKOFF_SECONDS",
             DEFAULT_HEALTH_BACKOFF_SECONDS,
         ),
+        notifications=_env_csv_set("GUERITE_NOTIFICATIONS", DEFAULT_NOTIFICATIONS),
         timezone=getenv("GUERITE_TZ", DEFAULT_TZ),
         pushover_token=getenv("GUERITE_PUSHOVER_TOKEN"),
         pushover_user=getenv("GUERITE_PUSHOVER_USER"),
@@ -62,3 +65,10 @@ def _env_int(name: str, default: int) -> int:
         return int(value)
     except ValueError:
         return default
+
+
+def _env_csv_set(name: str, default: str) -> Set[str]:
+    raw = getenv(name, default)
+    items = raw.split(",") if raw else []
+    normalized = {item.strip().lower() for item in items if item.strip()}
+    return normalized if normalized else {default}

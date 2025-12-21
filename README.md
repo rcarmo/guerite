@@ -49,6 +49,7 @@ Set environment variables to adjust behavior:
 - `GUERITE_RESTART_LABEL` (default `guerite.restart`): Label key containing cron expressions that schedule forced restarts (without pulling).
 - `GUERITE_HEALTH_CHECK_LABEL` (default `guerite.health_check`): Label key containing cron expressions that schedule health checks/restarts.
 - `GUERITE_HEALTH_CHECK_BACKOFF_SECONDS` (default `300`): Minimum seconds between health-based restarts per container.
+- `GUERITE_NOTIFICATIONS` (default `update`): Comma-delimited list of events to notify via Pushover; accepted values: `update`, `restart`, `health` (or `health_check`).
 - `GUERITE_TZ` (default `UTC`): Time zone used to evaluate cron expressions.
 - `GUERITE_DRY_RUN` (default `false`): If `true`, log actions without restarting containers.
 - `GUERITE_LOG_LEVEL` (default `INFO`): Log level (e.g., `DEBUG`, `INFO`).
@@ -62,6 +63,11 @@ Add labels to any container you want Guerite to manage (any label opts the conta
 - `guerite.update=*/10 * * * *` schedules image pull/update checks and restarts when the image changes.
 - `guerite.restart=0 3 * * *` schedules forced restarts at the specified cron times (no image pull).
 - `guerite.health_check=*/5 * * * *` runs a health check on the cron schedule; if the container is not `healthy`, it is restarted (rate-limited by the backoff).
+
+Notifications:
+- Update: sent when an image is pulled and the container is restarted (if `GUERITE_NOTIFICATIONS` includes `update`).
+- Restart: sent on cron-driven restarts when `GUERITE_NOTIFICATIONS` includes `restart`.
+- Health: sent on health-check-driven restarts when `GUERITE_NOTIFICATIONS` includes `health`/`health_check`.
 
 ## Quick start (local Docker socket)
 
