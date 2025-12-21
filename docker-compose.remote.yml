@@ -2,8 +2,7 @@ version: "3.9"
 
 services:
   guerite:
-    build: .
-    image: guerite:latest
+    image: ghcr.io/rcarmo/guerite:latest
     environment:
       DOCKER_HOST: "tcp://remote-docker-host:2376"
       DOCKER_TLS_VERIFY: "1"

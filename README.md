@@ -10,6 +10,10 @@ Guerite is a [watchtower](https://github.com/containrrr/watchtower) alternative 
 - Python 3.9+ if running from source; otherwise build the container image
 - Optional: Pushover token/user for notifications
 
+## Image Repository
+
+The official image is available at [ghcr.io/rcarmo/guerite](https://ghcr.io/rcarmo/guerite).
+
 ## Build the image
 
 Build from the included Dockerfile:
@@ -71,7 +75,7 @@ Notifications:
 
 ## Quick start (local Docker socket)
 
-Use the provided compose file to build and run Guerite against the local daemon:
+Use the provided compose file to run Guerite against the local daemon:
 
 ```bash
 docker compose -f docker-compose.local.yml up -d --build
