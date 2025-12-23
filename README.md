@@ -11,6 +11,7 @@ It provides Pushover notifications and talks directly to the Docker API and can 
 - Docker API access (local socket or remote TCP/TLS endpoint)
 - Python 3.9+ if running from source; otherwise build the container image
 - Optional: Pushover token/user for notifications
+- Optional: Webhook URL for JSON notifications
 
 ## Image Repository
 
@@ -56,13 +57,14 @@ Set environment variables to adjust behavior:
 - `GUERITE_HEALTH_CHECK_LABEL` (default `guerite.health_check`): Label key containing cron expressions that schedule health checks/restarts.
 - `GUERITE_HEALTH_CHECK_BACKOFF_SECONDS` (default `300`): Minimum seconds between health-based restarts per container.
 - `GUERITE_PRUNE_CRON` (default unset): Cron expression to periodically prune unused images (non-dangling only). When unset, pruning is skipped.
-- `GUERITE_NOTIFICATIONS` (default `update`): Comma-delimited list of events to notify via Pushover; accepted values: `update`, `restart`, `health`/`health_check`, `startup`, `detect`, `prune`.
+- `GUERITE_NOTIFICATIONS` (default `update`): Comma-delimited list of events to notify via Pushover/webhook; accepted values: `update`, `restart`, `health`/`health_check`, `startup`, `detect`, `prune`.
 - `GUERITE_TZ` (default `UTC`): Time zone used to evaluate cron expressions.
 - `GUERITE_STATE_FILE` (default `/tmp/guerite_state.json`): Path to persist health backoff state across restarts; file must be writable.
 - `GUERITE_DRY_RUN` (default `false`): If `true`, log actions without restarting containers.
 - `GUERITE_LOG_LEVEL` (default `INFO`): Log level (e.g., `DEBUG`, `INFO`).
 - `GUERITE_PUSHOVER_TOKEN` / `GUERITE_PUSHOVER_USER`: Enable notifications when both are set.
 - `GUERITE_PUSHOVER_API` (default `https://api.pushover.net/1/messages.json`): Pushover endpoint override.
+- `GUERITE_WEBHOOK_URL` (default unset): If set, sends JSON `{ "title": ..., "message": ... }` POSTs to this URL for enabled events.
 
 ## Container labels
 

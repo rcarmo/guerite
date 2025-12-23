@@ -17,6 +17,7 @@ from docker.models.images import Image
 
 from .config import Settings
 from .notifier import notify_pushover
+from .notifier import notify_webhook
 from .utils import now_utc
 
 LOG = getLogger(__name__)
@@ -435,6 +436,7 @@ def _flush_detect_notifications(settings: Settings, hostname: str, current_time:
     unique = sorted({name or "unknown" for name in _PENDING_DETECTS})
     message = "New monitored containers: " + ", ".join(unique)
     notify_pushover(settings, f"Guerite on {hostname}", message)
+    notify_webhook(settings, f"Guerite on {hostname}", message)
     LOG.info(message)
     _PENDING_DETECTS = []
     _LAST_DETECT_NOTIFY = current_time
@@ -554,7 +556,10 @@ def run_once(
         prune_images(client, settings, event_log, notify_prune)
 
     if event_log:
-        notify_pushover(settings, f"Guerite on {hostname}", "\n".join(event_log))
+        title = f"Guerite on {hostname}"
+        body = "\n".join(event_log)
+        notify_pushover(settings, title, body)
+        notify_webhook(settings, title, body)
     _flush_detect_notifications(settings, hostname, current_time)
 
 

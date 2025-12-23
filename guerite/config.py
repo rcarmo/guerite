@@ -13,6 +13,7 @@ DEFAULT_LOG_LEVEL = "INFO"
 DEFAULT_TZ = "UTC"
 DEFAULT_STATE_FILE = "/tmp/guerite_state.json"
 DEFAULT_PRUNE_CRON: str | None = None
+DEFAULT_WEBHOOK_URL: str | None = None
 
 
 @dataclass(frozen=True)
@@ -27,6 +28,7 @@ class Settings:
     pushover_token: Optional[str]
     pushover_user: Optional[str]
     pushover_api: str
+    webhook_url: Optional[str]
     dry_run: bool
     log_level: str
     state_file: str
@@ -48,6 +50,7 @@ def load_settings() -> Settings:
         pushover_token=getenv("GUERITE_PUSHOVER_TOKEN"),
         pushover_user=getenv("GUERITE_PUSHOVER_USER"),
         pushover_api=getenv("GUERITE_PUSHOVER_API", DEFAULT_PUSHOOVER_API),
+        webhook_url=_env_str("GUERITE_WEBHOOK_URL", DEFAULT_WEBHOOK_URL),
         dry_run=_env_bool("GUERITE_DRY_RUN", False),
         log_level=getenv("GUERITE_LOG_LEVEL", DEFAULT_LOG_LEVEL).upper(),
         state_file=getenv("GUERITE_STATE_FILE", DEFAULT_STATE_FILE),
