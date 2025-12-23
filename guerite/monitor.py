@@ -29,6 +29,8 @@ _KNOWN_CONTAINERS: set[str] = set()
 _KNOWN_INITIALIZED = False
 _PENDING_DETECTS: list[str] = []
 _LAST_DETECT_NOTIFY: Optional[datetime] = None
+_RESTART_BACKOFF: dict[str, datetime] = {}
+_RESTART_FAIL_COUNT: dict[str, int] = {}
 
 
 
@@ -169,6 +171,27 @@ def _health_allowed(container_id: str, now: datetime, settings: Settings) -> boo
     remaining = (next_time - now).total_seconds()
     LOG.debug("Skipping unhealthy restart for %s; backoff %.0fs remaining", container_id, remaining)
     return False
+
+
+def _restart_allowed(container_id: str, now: datetime, settings: Settings) -> bool:
+    next_time = _RESTART_BACKOFF.get(container_id)
+    if next_time is None:
+        return True
+    if now >= next_time:
+        return True
+    remaining = (next_time - now).total_seconds()
+    LOG.debug("Skipping restart for %s; recreate backoff %.0fs remaining", container_id, remaining)
+    return False
+
+
+def _notify_restart_backoff(container_name: str, container_id: str, backoff_until: datetime, event_log: list[str], settings: Settings) -> None:
+    key = f"{container_id}-backoff-notified"
+    if key in _HEALTH_BACKOFF:
+        return
+    event_log.append(
+        f"Recreate for {container_name} deferred until {backoff_until.isoformat()} after repeated failures"
+    )
+    _HEALTH_BACKOFF[key] = backoff_until
 
 
 def _should_notify(settings: Settings, event: str) -> bool:
@@ -369,6 +392,9 @@ def restart_container(
             container.remove()
         except DockerException:
             LOG.debug("Could not remove old container %s", temp_old_name)
+        # Reset failure counters on success
+        _RESTART_FAIL_COUNT.pop(container.id, None)
+        _RESTART_BACKOFF.pop(container.id, None)
         return True
     except (APIError, DockerException, TypeError) as error:
         LOG.error("Failed to restart %s during recreate: %s", original_name, error)
@@ -385,6 +411,14 @@ def restart_container(
                 LOG.debug("Cleanup failed for new container %s", new_id)
         if notify:
             event_log.append(f"Failed to restart {original_name}: {error}")
+        # Bump failure count and set backoff to avoid tight loops
+        fail_count = _RESTART_FAIL_COUNT.get(container.id, 0) + 1
+        _RESTART_FAIL_COUNT[container.id] = fail_count
+        backoff_seconds = min(settings.health_backoff_seconds * max(1, fail_count), 3600)
+        backoff_until = now_utc() + timedelta(seconds=backoff_seconds)
+        _RESTART_BACKOFF[container.id] = backoff_until
+        if notify:
+            _notify_restart_backoff(original_name, container.id, backoff_until, event_log, settings)
         return False
 
 
@@ -521,6 +555,12 @@ def run_once(
                 continue
 
         if unhealthy_now and not _health_allowed(container.id, current_time, settings):
+            continue
+        if not _restart_allowed(container.id, current_time, settings):
+            if _should_notify(settings, "restart") or _should_notify(settings, "update") or _should_notify(settings, "health"):
+                backoff_until = _RESTART_BACKOFF.get(container.id)
+                if backoff_until is not None:
+                    _notify_restart_backoff(container.name, container.id, backoff_until, event_log, settings)
             continue
 
         reason = "scheduled restart" if restart_due else "unhealthy" if unhealthy_now else "restart"
