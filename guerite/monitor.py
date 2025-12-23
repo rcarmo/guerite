@@ -1,6 +1,7 @@
 import re
 from datetime import datetime
 from datetime import timedelta
+from datetime import timezone
 from json import JSONDecodeError
 from json import dump
 from json import load
@@ -143,6 +144,10 @@ def _started_recently(container: Container, now: datetime, grace_seconds: int) -
         # Handle timestamps like 2025-01-01T00:00:00.000000000Z
         sanitized = started_at.rstrip("Z")
         started_dt = datetime.fromisoformat(sanitized)
+        if started_dt.tzinfo is None:
+            started_dt = started_dt.replace(tzinfo=timezone.utc)
+        if now.tzinfo is None:
+            now = now.replace(tzinfo=timezone.utc)
     except (ValueError, TypeError):
         return False
     return (now - started_dt).total_seconds() < grace_seconds
