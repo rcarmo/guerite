@@ -260,7 +260,15 @@ def restart_container(
                 "priority": network_cfg.get("GatewayPriority") or network_cfg.get("GwPriority"),
             }
             endpoint_kwargs = {key: value for key, value in endpoint_kwargs.items() if value is not None}
-            endpoint_map[network_name] = client.api.create_endpoint_config(**endpoint_kwargs)
+            try:
+                endpoint_map[network_name] = client.api.create_endpoint_config(**endpoint_kwargs)
+            except TypeError:
+                if "priority" in endpoint_kwargs:
+                    fallback = {key: value for key, value in endpoint_kwargs.items() if key != "priority"}
+                    LOG.debug("create_endpoint_config without priority for %s", network_name)
+                    endpoint_map[network_name] = client.api.create_endpoint_config(**fallback)
+                else:
+                    raise
 
     create_kwargs = {
         "attach_stderr": config.get("AttachStderr"),
