@@ -135,6 +135,10 @@ def _has_healthcheck(container: Container) -> bool:
     return bool(health_cfg)
 
 
+def _is_swarm_managed(container: Container) -> bool:
+    return "com.docker.swarm.service.id" in container.labels
+
+
 def _preflight_mounts(name: str, mounts: list[dict], notify: bool, event_log: list[str]) -> None:
     for mount in mounts:
         mount_type = mount.get("Type")
@@ -291,6 +295,7 @@ def restart_container(
                     ipv6_address=ipam_cfg.get("IPv6Address"),
                     link_local_ips=ipam_cfg.get("LinkLocalIPs"),
                     driver_opt=network_cfg.get("DriverOpts"),
+                    mac_address=network_cfg.get("MacAddress"),
                 )
         client.api.rename(new_id, original_name)
         client.api.start(new_id)
@@ -393,6 +398,11 @@ def run_once(
         update_due = _cron_matches(container, settings.update_label, current_time)
         restart_due = _cron_matches(container, settings.restart_label, current_time)
         health_due = _cron_matches(container, settings.health_label, current_time)
+        if (update_due or restart_due or health_due) and _is_swarm_managed(container):
+            LOG.warning("Skipping %s; swarm-managed containers may lose secrets/configs if recreated", container.name)
+            if _should_notify(settings, "restart") or _should_notify(settings, "update") or _should_notify(settings, "health"):
+                event_log.append(f"Skipping swarm-managed container {container.name}; secrets/configs not safely restorable")
+            continue
         if health_due and not _has_healthcheck(container):
             if container.id not in _NO_HEALTH_WARNED:
                 LOG.warning("Container %s has %s label but no healthcheck; skipping health restarts", container.name, settings.health_label)
