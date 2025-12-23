@@ -4,6 +4,7 @@ from math import ceil
 from socket import gethostname
 from threading import Event, Thread
 from time import sleep
+from typing import Optional
 
 from docker import DockerClient
 from docker.errors import DockerException
@@ -28,6 +29,20 @@ def _format_human_local(dt, reference):
     else:
         prefix = date_part.isoformat()
     return f"{prefix} {dt.strftime('%H:%M')}"
+
+
+def _short_label(label: Optional[str]) -> str:
+    if label is None:
+        return "unspecified"
+    if label.startswith("guerite."):
+        return label.split(".", 1)[1]
+    return label
+
+
+def _format_reason(container_name: Optional[str], label_key: Optional[str]) -> str:
+    name = container_name or "unspecified"
+    label = _short_label(label_key)
+    return f"{name} ({label})"
 
 
 def build_client(settings: Settings) -> DockerClient:
@@ -90,9 +105,25 @@ def main() -> None:
     start_event_listener(client, settings, wake_signal)
     logged_schedule = False
     hostname = gethostname()
+    current_reason_name: Optional[str] = None
+    current_reason_label: Optional[str] = None
+    current_reason_source: Optional[str] = "startup"
+    next_reason_name: Optional[str] = None
+    next_reason_label: Optional[str] = None
     while True:
         timestamp = now_tz(settings.timezone)
         containers = select_monitored_containers(client, settings)
+        if current_reason_source is not None:
+            if current_reason_source == "docker_event":
+                LOG.info("Running checks due to docker event")
+            elif current_reason_name is not None or current_reason_label is not None:
+                LOG.info(
+                    "Running checks for %s",
+                    _format_reason(current_reason_name, current_reason_label),
+                )
+            else:
+                LOG.info("Running checks (unspecified trigger)")
+            current_reason_source = None
         if not logged_schedule:
             summary = schedule_summary(containers, settings, reference=timestamp)
             prune_next = next_prune_time(settings, reference=timestamp)
@@ -106,14 +137,26 @@ def main() -> None:
                 LOG.info("No upcoming checks found")
             logged_schedule = True
         run_once(client, settings, timestamp=timestamp, containers=containers)
-        next_run_at = next_wakeup(containers, settings, reference=timestamp)
+        next_run_at, next_name, next_label = next_wakeup(containers, settings, reference=timestamp)
         delta_seconds = (next_run_at - now_tz(settings.timezone)).total_seconds()
         sleep_seconds = max(1, int(ceil(delta_seconds)))
-        LOG.info("Next check at %s (in %ss)", next_run_at.isoformat(), sleep_seconds)
+        LOG.info(
+            "Next check at %s (in %ss) for %s",
+            next_run_at.isoformat(),
+            sleep_seconds,
+            _format_reason(next_name, next_label),
+        )
         woke = wake_signal.wait(timeout=sleep_seconds)
         if woke:
             wake_signal.clear()
             LOG.debug("Woken early by Docker event")
+            current_reason_name = None
+            current_reason_label = None
+            current_reason_source = "docker_event"
+        else:
+            current_reason_name = next_name
+            current_reason_label = next_label
+            current_reason_source = "schedule"
 
 
 if __name__ == "__main__":

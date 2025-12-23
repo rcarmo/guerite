@@ -879,8 +879,12 @@ def run_once(
     _flush_detect_notifications(settings, hostname, current_time)
 
 
-def next_wakeup(containers: list[Container], settings: Settings, reference: datetime) -> datetime:
-    candidates: list[datetime] = []
+def next_wakeup(
+    containers: list[Container],
+    settings: Settings,
+    reference: datetime,
+) -> tuple[datetime, Optional[str], Optional[str]]:
+    candidates: list[tuple[datetime, Optional[str], Optional[str]]] = []
     for container in containers:
         for label_key in (settings.update_label, settings.restart_label, settings.recreate_label, settings.health_label):
             cron_expression = container.labels.get(label_key)
@@ -890,7 +894,7 @@ def next_wakeup(containers: list[Container], settings: Settings, reference: date
             try:
                 iterator = croniter(cron_expression, reference, ret_type=datetime)
                 next_time = iterator.get_next(datetime)
-                candidates.append(next_time)
+                candidates.append((next_time, container.name, label_key))
                 upcoming = _upcoming_runs(iterator, count=2)
                 LOG.debug(
                     "%s %s (%s) next %s then %s",
@@ -904,9 +908,9 @@ def next_wakeup(containers: list[Container], settings: Settings, reference: date
                 LOG.warning("Invalid cron expression on %s (%s): %s", container.name, label_key, error)
 
     if not candidates:
-        return reference + timedelta(seconds=300)
+        return reference + timedelta(seconds=300), None, None
 
-    return min(candidates)
+    return min(candidates, key=lambda item: item[0])
 
 
 def _upcoming_runs(iterator: croniter, count: int) -> list[datetime]:
