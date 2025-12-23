@@ -1,6 +1,10 @@
 from datetime import datetime
 from datetime import timedelta
+from json import JSONDecodeError
+from json import dump
+from json import load
 from logging import getLogger
+from os.path import exists
 from socket import gethostname
 from typing import Optional
 
@@ -16,6 +20,43 @@ from .utils import now_utc
 
 LOG = getLogger(__name__)
 _HEALTH_BACKOFF: dict[str, datetime] = {}
+_HEALTH_BACKOFF_LOADED = False
+_NO_HEALTH_WARNED: set[str] = set()
+_PRUNE_CRON_INVALID = False
+_KNOWN_CONTAINERS: set[str] = set()
+_KNOWN_INITIALIZED = False
+_PENDING_DETECTS: list[str] = []
+_LAST_DETECT_NOTIFY: Optional[datetime] = None
+
+
+
+def _ensure_health_backoff_loaded(state_file: str) -> None:
+    global _HEALTH_BACKOFF_LOADED
+    if _HEALTH_BACKOFF_LOADED:
+        return
+    try:
+        with open(state_file, "r", encoding="utf-8") as handle:
+            data = load(handle)
+        if isinstance(data, dict):
+            for container_id, iso_value in data.items():
+                try:
+                    _HEALTH_BACKOFF[container_id] = datetime.fromisoformat(iso_value)
+                except (ValueError, TypeError):
+                    continue
+    except FileNotFoundError:
+        pass
+    except (OSError, JSONDecodeError) as error:
+        LOG.debug("Failed to load health backoff state: %s", error)
+    _HEALTH_BACKOFF_LOADED = True
+
+
+def _save_health_backoff(state_file: str) -> None:
+    serializable = {container_id: value.isoformat() for container_id, value in _HEALTH_BACKOFF.items()}
+    try:
+        with open(state_file, "w", encoding="utf-8") as handle:
+            dump(serializable, handle)
+    except OSError as error:
+        LOG.debug("Failed to persist health backoff state to %s: %s", state_file, error)
 
 
 def select_monitored_containers(client: DockerClient, settings: Settings) -> list[Container]:
@@ -85,6 +126,34 @@ def _is_unhealthy(container: Container) -> bool:
     return True
 
 
+def _has_healthcheck(container: Container) -> bool:
+    try:
+        health_cfg = container.attrs.get("Config", {}).get("Healthcheck")
+    except DockerException as error:
+        LOG.warning("Could not read health configuration for %s: %s", container.name, error)
+        return False
+    return bool(health_cfg)
+
+
+def _preflight_mounts(name: str, mounts: list[dict], notify: bool, event_log: list[str]) -> None:
+    for mount in mounts:
+        mount_type = mount.get("Type")
+        if mount_type == "bind":
+            source = mount.get("Source")
+            if source and not exists(source):
+                LOG.warning("Bind source %s missing for %s; recreate may fail", source, name)
+                if notify:
+                    event_log.append(f"Bind source missing for {name}: {source}")
+        elif mount_type == "volume":
+            driver = mount.get("Driver")
+            if driver and driver != "local":
+                LOG.warning("Volume %s uses driver %s for %s; ensure driver is available", mount.get("Name"), driver, name)
+                if notify:
+                    event_log.append(
+                        f"Volume driver {driver} for {name} at {mount.get('Destination')}"
+                    )
+
+
 def _health_allowed(container_id: str, now: datetime, settings: Settings) -> bool:
     next_time = _HEALTH_BACKOFF.get(container_id)
     if next_time is None:
@@ -98,6 +167,48 @@ def _health_allowed(container_id: str, now: datetime, settings: Settings) -> boo
 
 def _should_notify(settings: Settings, event: str) -> bool:
     return event in settings.notifications
+
+
+def _prune_due(settings: Settings, timestamp: datetime) -> bool:
+    global _PRUNE_CRON_INVALID
+    cron_expression = settings.prune_cron
+    if not cron_expression:
+        return False
+    if _PRUNE_CRON_INVALID:
+        return False
+    try:
+        return croniter.match(cron_expression, timestamp)
+    except (ValueError, KeyError) as error:
+        LOG.warning("Invalid prune cron expression %s: %s", cron_expression, error)
+        _PRUNE_CRON_INVALID = True
+        return False
+
+
+def next_prune_time(settings: Settings, reference: datetime) -> Optional[datetime]:
+    global _PRUNE_CRON_INVALID
+    cron_expression = settings.prune_cron
+    if not cron_expression or _PRUNE_CRON_INVALID:
+        return None
+    try:
+        iterator = croniter(cron_expression, reference, ret_type=datetime)
+        return iterator.get_next(datetime)
+    except (ValueError, KeyError) as error:
+        LOG.warning("Invalid prune cron expression %s: %s", cron_expression, error)
+        _PRUNE_CRON_INVALID = True
+        return None
+
+
+def _track_new_containers(containers: list[Container]) -> None:
+    global _KNOWN_INITIALIZED
+    if not _KNOWN_INITIALIZED:
+        for container in containers:
+            _KNOWN_CONTAINERS.add(container.id)
+        _KNOWN_INITIALIZED = True
+        return
+    for container in containers:
+        if container.id not in _KNOWN_CONTAINERS:
+            _KNOWN_CONTAINERS.add(container.id)
+            _PENDING_DETECTS.append(container.name)
 
 
 def _short_id(identifier: Optional[str]) -> str:
@@ -122,6 +233,13 @@ def restart_container(
     exposed_ports = config.get("ExposedPorts")
     ports = list(exposed_ports.keys()) if isinstance(exposed_ports, dict) else None
 
+    original_name = name
+    short_suffix = container.id[:8]
+    temp_old_name = f"{name}-guerite-old-{short_suffix}"
+    temp_new_name = f"{name}-guerite-new-{short_suffix}"
+
+    mounts = container.attrs.get("Mounts") or []
+
     create_kwargs = {
         "command": config.get("Cmd"),
         "domainname": config.get("Domainname"),
@@ -133,7 +251,7 @@ def restart_container(
         "image": image_ref,
         "labels": config.get("Labels"),
         "mac_address": config.get("MacAddress"),
-        "name": name,
+        "name": temp_new_name,
         "network_disabled": config.get("NetworkDisabled"),
         "ports": ports,
         "runtime": host_config.get("Runtime") if isinstance(host_config, dict) else None,
@@ -148,15 +266,20 @@ def restart_container(
 
     create_kwargs = {key: value for key, value in create_kwargs.items() if value is not None}
 
+    _preflight_mounts(name, mounts, notify, event_log)
+
+    new_id: Optional[str] = None
     try:
-        LOG.info("Stopping %s", name)
-        if notify:
-            event_log.append(f"Stopping container {name} ({_short_id(container.image.id)})")
-        container.stop()
-        container.remove()
+        client.api.rename(container.id, temp_old_name)
         created = client.api.create_container(**create_kwargs)
         new_id = created.get("Id")
-        if networking is not None and new_id is not None:
+        LOG.info("Stopping %s", original_name)
+        if notify:
+            event_log.append(f"Stopping container {original_name} ({_short_id(container.image.id)})")
+        container.stop()
+        if new_id is None:
+            raise DockerException("create_container returned no Id")
+        if networking is not None:
             for network_name, network_cfg in networking.items():
                 ipam_cfg = network_cfg.get("IPAMConfig") or {}
                 client.api.connect_container_to_network(
@@ -169,14 +292,30 @@ def restart_container(
                     link_local_ips=ipam_cfg.get("LinkLocalIPs"),
                     driver_opts=network_cfg.get("DriverOpts"),
                 )
-        if new_id is not None:
-            client.api.start(new_id)
-            if notify:
-                event_log.append(f"Creating container {name} ({_short_id(new_image_id)})")
-        LOG.info("Restarted %s", name)
+        client.api.rename(new_id, original_name)
+        client.api.start(new_id)
+        LOG.info("Restarted %s", original_name)
+        if notify:
+            event_log.append(f"Creating container {original_name} ({_short_id(new_image_id)})")
+        try:
+            container.remove()
+        except DockerException:
+            LOG.debug("Could not remove old container %s", temp_old_name)
         return True
     except (APIError, DockerException) as error:
-        LOG.error("Failed to restart %s: %s", name, error)
+        LOG.error("Failed to restart %s: %s", original_name, error)
+        try:
+            client.api.rename(container.id, original_name)
+            container.start()
+        except DockerException:
+            LOG.warning("Rollback failed for %s", original_name)
+        if new_id is not None:
+            try:
+                client.api.remove_container(new_id, force=True)
+            except DockerException:
+                LOG.debug("Cleanup failed for new container %s", new_id)
+        if notify:
+            event_log.append(f"Failed to restart {original_name}: {error}")
         return False
 
 
@@ -194,10 +333,47 @@ def remove_old_image(
         LOG.info("Removed old image %s", old_image_id)
         if notify:
             event_log.append(f"Removing image ({_short_id(old_image_id)})")
-    except APIError as error:
-        LOG.debug("Could not remove old image %s: %s", old_image_id, error)
-    except DockerException as error:
-        LOG.debug("Could not remove old image %s: %s", old_image_id, error)
+    except (APIError, DockerException) as error:
+        LOG.warning("Could not remove old image %s: %s", old_image_id, error)
+        if notify:
+            event_log.append(f"Failed to remove image ({_short_id(old_image_id)}): {error}")
+
+
+def prune_images(
+    client: DockerClient,
+    settings: Settings,
+    event_log: list[str],
+    notify: bool,
+) -> None:
+    try:
+        result = client.api.prune_images(filters={"dangling": False})
+        reclaimed = result.get("SpaceReclaimed") if isinstance(result, dict) else None
+        images_deleted = result.get("ImagesDeleted") if isinstance(result, dict) else None
+        LOG.info("Pruned images; reclaimed %s bytes; deleted %s entries", reclaimed, len(images_deleted or []))
+        if notify:
+            event_log.append(
+                "Pruned images" + (f"; reclaimed {reclaimed} bytes" if reclaimed is not None else "")
+            )
+    except (APIError, DockerException) as error:
+        LOG.warning("Image prune failed: %s", error)
+        if notify:
+            event_log.append(f"Image prune failed: {error}")
+
+
+def _flush_detect_notifications(settings: Settings, hostname: str, current_time: datetime) -> None:
+    global _PENDING_DETECTS, _LAST_DETECT_NOTIFY
+    if not _PENDING_DETECTS:
+        return
+    if not _should_notify(settings, "detect"):
+        return
+    if _LAST_DETECT_NOTIFY is not None and (current_time - _LAST_DETECT_NOTIFY).total_seconds() < 60:
+        return
+    unique = sorted({name or "unknown" for name in _PENDING_DETECTS})
+    message = "New monitored containers: " + ", ".join(unique)
+    notify_pushover(settings, f"Guerite on {hostname}", message)
+    LOG.info(message)
+    _PENDING_DETECTS = []
+    _LAST_DETECT_NOTIFY = current_time
 
 
 def run_once(
@@ -206,14 +382,22 @@ def run_once(
     timestamp: Optional[datetime] = None,
     containers: Optional[list[Container]] = None,
 ) -> None:
+    _ensure_health_backoff_loaded(settings.state_file)
     current_time = timestamp or now_utc()
+    prune_due = _prune_due(settings, current_time)
     monitored = containers if containers is not None else select_monitored_containers(client, settings)
+    _track_new_containers(monitored)
     event_log: list[str] = []
     hostname = gethostname()
     for container in monitored:
         update_due = _cron_matches(container, settings.update_label, current_time)
         restart_due = _cron_matches(container, settings.restart_label, current_time)
         health_due = _cron_matches(container, settings.health_label, current_time)
+        if health_due and not _has_healthcheck(container):
+            if container.id not in _NO_HEALTH_WARNED:
+                LOG.warning("Container %s has %s label but no healthcheck; skipping health restarts", container.name, settings.health_label)
+                _NO_HEALTH_WARNED.add(container.id)
+            health_due = False
         unhealthy_now = health_due and _is_unhealthy(container)
 
         if not any([update_due, restart_due, unhealthy_now]):
@@ -256,6 +440,8 @@ def run_once(
                     update_executed = True
             elif pulled_image is not None:
                 LOG.debug("%s is up-to-date", container.name)
+            elif notify_update:
+                event_log.append(f"Failed to pull {image_ref} for {container.name}")
             if update_executed:
                 continue
 
@@ -282,6 +468,7 @@ def run_once(
         ):
             if unhealthy_now:
                 _HEALTH_BACKOFF[container.id] = current_time + timedelta(seconds=settings.health_backoff_seconds)
+                _save_health_backoff(settings.state_file)
                 if _should_notify(settings, "health") or _should_notify(settings, "health_check"):
                     event_log.append(
                         f"Restarted {container.name} after failed health check ({_short_id(new_image_id)})"
@@ -290,9 +477,16 @@ def run_once(
                 event_log.append(
                     f"Restarted {container.name} (scheduled restart) ({_short_id(new_image_id)})"
                 )
+        elif notify_event:
+            event_log.append(f"Failed to restart {container.name}")
+
+    if prune_due:
+        notify_prune = _should_notify(settings, "prune")
+        prune_images(client, settings, event_log, notify_prune)
 
     if event_log:
         notify_pushover(settings, f"Guerite on {hostname}", "\n".join(event_log))
+    _flush_detect_notifications(settings, hostname, current_time)
 
 
 def next_wakeup(containers: list[Container], settings: Settings, reference: datetime) -> datetime:

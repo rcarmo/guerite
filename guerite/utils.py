@@ -5,6 +5,7 @@ from typing import Optional
 
 LOG_FORMAT = "%(asctime)s %(levelname)s %(message)s"
 LOG_DATE_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
+LOG = getLogger(__name__)
 
 
 def configure_logging(level: str) -> None:
@@ -18,7 +19,8 @@ def now_utc() -> datetime:
 def now_tz(tz_name: str) -> datetime:
     try:
         return datetime.now(ZoneInfo(tz_name))
-    except Exception:
+    except Exception as error:
+        LOG.warning("Falling back to UTC; invalid timezone %s: %s", tz_name, error)
         return datetime.now(timezone.utc)
 
 

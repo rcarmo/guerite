@@ -11,6 +11,8 @@ DEFAULT_DOCKER_HOST = "unix://var/run/docker.sock"
 DEFAULT_PUSHOOVER_API = "https://api.pushover.net/1/messages.json"
 DEFAULT_LOG_LEVEL = "INFO"
 DEFAULT_TZ = "UTC"
+DEFAULT_STATE_FILE = "/tmp/guerite_state.json"
+DEFAULT_PRUNE_CRON: str | None = None
 
 
 @dataclass(frozen=True)
@@ -27,6 +29,8 @@ class Settings:
     pushover_api: str
     dry_run: bool
     log_level: str
+    state_file: str
+    prune_cron: Optional[str]
 
 
 def load_settings() -> Settings:
@@ -46,6 +50,8 @@ def load_settings() -> Settings:
         pushover_api=getenv("GUERITE_PUSHOVER_API", DEFAULT_PUSHOOVER_API),
         dry_run=_env_bool("GUERITE_DRY_RUN", False),
         log_level=getenv("GUERITE_LOG_LEVEL", DEFAULT_LOG_LEVEL).upper(),
+        state_file=getenv("GUERITE_STATE_FILE", DEFAULT_STATE_FILE),
+        prune_cron=_env_str("GUERITE_PRUNE_CRON", DEFAULT_PRUNE_CRON),
     )
 
 
@@ -72,3 +78,11 @@ def _env_csv_set(name: str, default: str) -> Set[str]:
     items = raw.split(",") if raw else []
     normalized = {item.strip().lower() for item in items if item.strip()}
     return normalized if normalized else {default}
+
+
+def _env_str(name: str, default: Optional[str]) -> Optional[str]:
+    value = getenv(name)
+    if value is None:
+        return default
+    stripped = value.strip()
+    return stripped if stripped else default

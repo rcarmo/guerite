@@ -53,8 +53,10 @@ Set environment variables to adjust behavior:
 - `GUERITE_RESTART_LABEL` (default `guerite.restart`): Label key containing cron expressions that schedule forced restarts (without pulling).
 - `GUERITE_HEALTH_CHECK_LABEL` (default `guerite.health_check`): Label key containing cron expressions that schedule health checks/restarts.
 - `GUERITE_HEALTH_CHECK_BACKOFF_SECONDS` (default `300`): Minimum seconds between health-based restarts per container.
-- `GUERITE_NOTIFICATIONS` (default `update`): Comma-delimited list of events to notify via Pushover; accepted values: `update`, `restart`, `health`/`health_check`, `startup`.
+- `GUERITE_PRUNE_CRON` (default unset): Cron expression to periodically prune unused images (non-dangling only). When unset, pruning is skipped.
+- `GUERITE_NOTIFICATIONS` (default `update`): Comma-delimited list of events to notify via Pushover; accepted values: `update`, `restart`, `health`/`health_check`, `startup`, `detect`, `prune`.
 - `GUERITE_TZ` (default `UTC`): Time zone used to evaluate cron expressions.
+- `GUERITE_STATE_FILE` (default `/tmp/guerite_state.json`): Path to persist health backoff state across restarts; file must be writable.
 - `GUERITE_DRY_RUN` (default `false`): If `true`, log actions without restarting containers.
 - `GUERITE_LOG_LEVEL` (default `INFO`): Log level (e.g., `DEBUG`, `INFO`).
 - `GUERITE_PUSHOVER_TOKEN` / `GUERITE_PUSHOVER_USER`: Enable notifications when both are set.
@@ -70,8 +72,15 @@ Add labels to any container you want Guerite to manage (any label opts the conta
 
 Notifications:
 - Update: sent when an image is pulled and the container is restarted (if `GUERITE_NOTIFICATIONS` includes `update`).
-- Restart: sent on cron-driven restarts when `GUERITE_NOTIFICATIONS` includes `restart`.
-- Health: sent on health-check-driven restarts when `GUERITE_NOTIFICATIONS` includes `health`/`health_check`.
+- Restart: sent on cron-driven restarts when `GUERITE_NOTIFICATIONS` includes `restart`; failures to restart are also reported when restart notifications are enabled.
+- Health: sent on health-check-driven restarts when `GUERITE_NOTIFICATIONS` includes `health`/`health_check`; failures are reported when enabled.
+- Detect: sent when new monitored containers are detected; notifications are batched to at most one per minute when `GUERITE_NOTIFICATIONS` includes `detect`.
+- Prune: sent when periodic image pruning runs or fails (if `GUERITE_NOTIFICATIONS` includes `prune`).
+
+Image pruning:
+- Optional cron-driven prune removes unused images (not just dangling) via the Docker API.
+- Prune is skipped if `GUERITE_PRUNE_CRON` is unset.
+- On prune failure, a warning is logged and a notification is sent if enabled.
 
 ## Quick start (local Docker socket)
 

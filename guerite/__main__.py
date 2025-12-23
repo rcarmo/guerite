@@ -1,3 +1,4 @@
+from datetime import timedelta
 from logging import getLogger
 from math import ceil
 from socket import gethostname
@@ -8,7 +9,7 @@ from docker import DockerClient
 from docker.errors import DockerException
 
 from .config import Settings, load_settings
-from .monitor import next_wakeup, run_once, schedule_summary, select_monitored_containers
+from .monitor import next_prune_time, next_wakeup, run_once, schedule_summary, select_monitored_containers
 from .notifier import notify_pushover
 from .utils import configure_logging, now_tz
 
@@ -80,6 +81,9 @@ def main() -> None:
         containers = select_monitored_containers(client, settings)
         if not logged_schedule:
             summary = schedule_summary(containers, settings, reference=timestamp)
+            prune_next = next_prune_time(settings, reference=timestamp)
+            if prune_next is not None:
+                summary.append(_format_human_local(prune_next, timestamp) + " (prune)")
             if summary:
                 LOG.info("Upcoming checks: %s", "; ".join(summary))
                 if "startup" in settings.notifications:
@@ -100,3 +104,17 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+
+def _format_human_local(dt, reference):
+    if dt.tzinfo is not None and reference.tzinfo is not None:
+        dt = dt.astimezone(reference.tzinfo)
+    reference_date = reference.date()
+    date_part = dt.date()
+    if date_part == reference_date:
+        prefix = "today"
+    elif date_part == reference_date + timedelta(days=1):
+        prefix = "tomorrow"
+    else:
+        prefix = date_part.isoformat()
+    return f"{prefix} {dt.strftime('%H:%M')}"
