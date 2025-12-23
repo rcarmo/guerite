@@ -290,7 +290,7 @@ def restart_container(
                     ipv4_address=ipam_cfg.get("IPv4Address"),
                     ipv6_address=ipam_cfg.get("IPv6Address"),
                     link_local_ips=ipam_cfg.get("LinkLocalIPs"),
-                    driver_opts=network_cfg.get("DriverOpts"),
+                    driver_opt=network_cfg.get("DriverOpts"),
                 )
         client.api.rename(new_id, original_name)
         client.api.start(new_id)
