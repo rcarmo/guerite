@@ -454,9 +454,26 @@ def prune_images(
         images_deleted = result.get("ImagesDeleted") if isinstance(result, dict) else None
         LOG.info("Pruned images; reclaimed %s bytes; deleted %s entries", reclaimed, len(images_deleted or []))
         if notify:
-            event_log.append(
-                "Pruned images" + (f"; reclaimed {reclaimed} bytes" if reclaimed is not None else "")
-            )
+            summary = "Pruned images" + (f"; reclaimed {reclaimed} bytes" if reclaimed is not None else "")
+            event_log.append(summary)
+            if images_deleted:
+                # Docker returns items like {"Deleted": "sha256:..."} or {"Untagged": "repo:tag"}
+                pruned_labels: list[str] = []
+                for entry in images_deleted:
+                    if isinstance(entry, dict):
+                        label = entry.get("Untagged") or entry.get("Deleted")
+                        if label:
+                            pruned_labels.append(label)
+                    elif isinstance(entry, str):
+                        pruned_labels.append(entry)
+                if pruned_labels:
+                    max_list = 5
+                    shown = pruned_labels[:max_list]
+                    more = len(pruned_labels) - len(shown)
+                    body = "Pruned entries:\n" + "\n".join(shown)
+                    if more > 0:
+                        body += f"\n(+{more} more)"
+                    event_log.append(body)
     except (APIError, DockerException) as error:
         LOG.warning("Image prune failed: %s", error)
         if notify:
