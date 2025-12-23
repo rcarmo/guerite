@@ -28,16 +28,16 @@ def is_monitored_event(event: dict, settings: Settings) -> bool:
     action = event.get("Action")
     if action not in {
         "create",
-        "start",
-        "restart",
-        "stop",
-        "kill",
-        "die",
         "destroy",
-        "update",
-        "rename",
+        "die",
+        "kill",
         "pause",
+        "rename",
+        "restart",
+        "start",
+        "stop",
         "unpause",
+        "update",
     }:
         return False
     attributes = event.get("Actor", {}).get("Attributes", {})
