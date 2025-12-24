@@ -69,6 +69,10 @@ def test_notify_pushover_sends_and_warns(monkeypatch, settings: Settings, caplog
     notifier.notify_pushover(settings, "title", "body")
     assert any("Pushover returned" in msg for msg in caplog.messages)
     assert fake.calls and fake.calls[-1] == "closed"
+    method, path, body, headers = fake.calls[0]
+    assert method == "POST"
+    assert "title=title" in body.decode()
+    assert headers["Content-Type"] == "application/x-www-form-urlencoded"
 
 
 def test_notify_webhook_skips_when_missing(settings: Settings, caplog):
@@ -83,6 +87,10 @@ def test_notify_webhook_sends(monkeypatch, settings: Settings, caplog):
     monkeypatch.setattr(notifier, "HTTPSConnection", lambda netloc: fake)
     notifier.notify_webhook(settings, "title", "body")
     assert fake.calls and fake.calls[-1] == "closed"
+    method, path, body, headers = fake.calls[0]
+    assert method == "POST"
+    assert b"title" in body and b"body" in body
+    assert headers["Content-Type"] == "application/json"
 
 
 class DummyAPI:
@@ -282,6 +290,33 @@ def test_restart_container_connect_failure(monkeypatch, restart_settings: Settin
     assert result is False
 
 
+def test_restart_container_connect_success(monkeypatch, restart_settings: Settings):
+    client = DummyClient()
+    container = DummyContainer("app")
+    container.attrs["NetworkSettings"]["Networks"] = {
+        "net": {
+            "IPAMConfig": {},
+            "GatewayPriority": None,
+            "MacAddress": "aa:bb:cc:dd:ee:ff",
+            "Aliases": None,
+            "Links": None,
+        }
+    }
+
+    event_log = []
+    result = monitor.restart_container(
+        client,
+        container,
+        image_ref="repo:tag",
+        new_image_id="new-img",
+        settings=restart_settings,
+        event_log=event_log,
+        notify=False,
+    )
+    assert result is True
+    assert any(call[0] == "connect" for call in client.api.calls)
+
+
 def test_save_health_backoff_errors_are_handled(tmp_path, caplog):
     caplog.set_level("DEBUG")
     monitor._HEALTH_BACKOFF.clear()
@@ -314,3 +349,15 @@ def test_prune_success_logs(monkeypatch, restart_settings: Settings):
     monitor.prune_images(client, restart_settings, event_log, notify=True)
     assert client.api.prune_images_called is True
     assert any("Pruned images" in entry for entry in event_log)
+
+
+def test_prune_list_containers_failure(caplog, restart_settings: Settings):
+    caplog.set_level("WARNING")
+    client = DummyClient()
+    def broken_list(all=True):
+        raise monitor.DockerException("list failed")
+    client.containers.list = broken_list
+    event_log: list[str] = []
+    monitor.prune_images(client, restart_settings, event_log, notify=True)
+    assert any("Skipping prune" in entry for entry in event_log)
+    assert any("Skipping prune; could not list containers" in msg for msg in caplog.messages)
