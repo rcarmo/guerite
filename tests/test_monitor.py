@@ -4,57 +4,7 @@ import pytest
 
 from guerite.config import Settings
 from guerite import monitor
-
-
-class DummyContainer:
-    def __init__(self, name: str, labels: dict | None = None, host_links: list[str] | None = None):
-        self.name = name
-        self.labels = labels or {}
-        self.attrs = {
-            "HostConfig": {"Links": host_links or []},
-            "NetworkSettings": {},
-        }
-
-
-@pytest.fixture(autouse=True)
-def reset_state():
-    monitor._LAST_ACTION.clear()
-    monitor._IN_FLIGHT.clear()
-    monitor._RESTART_BACKOFF.clear()
-    monitor._HEALTH_BACKOFF.clear()
-    monitor._RESTART_FAIL_COUNT.clear()
-    yield
-    monitor._LAST_ACTION.clear()
-    monitor._IN_FLIGHT.clear()
-    monitor._RESTART_BACKOFF.clear()
-    monitor._HEALTH_BACKOFF.clear()
-    monitor._RESTART_FAIL_COUNT.clear()
-
-
-@pytest.fixture
-def settings() -> Settings:
-    return Settings(
-        docker_host="unix://test",
-        update_label="guerite.update",
-        restart_label="guerite.restart",
-        recreate_label="guerite.recreate",
-        health_label="guerite.health_check",
-        health_backoff_seconds=30,
-        notifications={"update"},
-        timezone="UTC",
-        pushover_token=None,
-        pushover_user=None,
-        pushover_api="https://example",
-        webhook_url=None,
-        dry_run=False,
-        log_level="INFO",
-        state_file="/tmp/guerite_state_test.json",
-        prune_cron=None,
-        rollback_grace_seconds=3600,
-        restart_retry_limit=3,
-        depends_label="guerite.depends_on",
-        action_cooldown_seconds=60,
-    )
+from tests.conftest import DummyContainer
 
 
 def test_strip_guerite_suffix_handles_nested():
