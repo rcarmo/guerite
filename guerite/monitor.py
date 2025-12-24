@@ -35,6 +35,70 @@ _RESTART_BACKOFF: dict[str, datetime] = {}
 _RESTART_FAIL_COUNT: dict[str, int] = {}
 
 
+def _compose_project(container: Container) -> Optional[str]:
+    labels = container.labels or {}
+    return labels.get("com.docker.compose.project")
+
+
+def _base_name(container: Container) -> str:
+    name = container.name or "unknown"
+    return _strip_guerite_suffix(name)
+
+
+def _link_targets(container: Container) -> set[str]:
+    host_config = container.attrs.get("HostConfig") or {}
+    links = host_config.get("Links") or []
+    targets: set[str] = set()
+    for entry in links:
+        if not isinstance(entry, str):
+            continue
+        target = entry.split(":", 1)[0].lstrip("/")
+        if target:
+            targets.add(_strip_guerite_suffix(target))
+    return targets
+
+
+def _toposort(names: set[str], deps: dict[str, set[str]]) -> list[str]:
+    incoming = {name: set(deps.get(name, set())) & names for name in names}
+    result: list[str] = []
+    ready = [name for name, incoming_deps in incoming.items() if not incoming_deps]
+    while ready:
+        current = ready.pop()
+        result.append(current)
+        for other, incoming_deps in incoming.items():
+            if current in incoming_deps:
+                incoming_deps.remove(current)
+                if not incoming_deps:
+                    ready.append(other)
+    if len(result) != len(names):
+        return sorted(names)
+    return result
+
+
+def _order_by_compose(containers: list[Container]) -> list[Container]:
+    grouped: dict[Optional[str], list[Container]] = {}
+    for container in containers:
+        grouped.setdefault(_compose_project(container), []).append(container)
+
+    ordered: list[Container] = []
+    for project, items in grouped.items():
+        if len(items) == 1:
+            ordered.extend(items)
+            continue
+        name_map: dict[str, Container] = {}
+        deps: dict[str, set[str]] = {}
+        for container in items:
+            base = _base_name(container)
+            name_map[base] = container
+            deps[base] = _link_targets(container)
+        names = set(name_map.keys())
+        for base in list(deps.keys()):
+            deps[base] = {dep for dep in deps[base] if dep in names}
+        sorted_names = _toposort(names, deps)
+        ordered.extend([name_map[name] for name in sorted_names])
+    return ordered
+
+
 
 def _ensure_health_backoff_loaded(state_file: str) -> None:
     global _HEALTH_BACKOFF_LOADED
@@ -269,6 +333,11 @@ def _register_restart_failure(
     fail_count = _RESTART_FAIL_COUNT.get(container_id, 0) + 1
     _RESTART_FAIL_COUNT[container_id] = fail_count
     backoff_seconds = min(settings.health_backoff_seconds * max(1, fail_count), 3600)
+    if fail_count >= settings.restart_retry_limit:
+        backoff_seconds = max(backoff_seconds, settings.health_backoff_seconds * settings.restart_retry_limit)
+        LOG.info(
+            "Reached restart retry limit for %s (%s failures); deferring", original_name, fail_count
+        )
     backoff_until = now_utc() + timedelta(seconds=backoff_seconds)
     _RESTART_BACKOFF[container_id] = backoff_until
     if notify:
@@ -534,6 +603,10 @@ def restart_container(
                 except DockerException:
                     LOG.debug("Could not stop new container %s", new_id)
                 try:
+                    try:
+                        client.api.rename(new_id, temp_new_name)
+                    except DockerException:
+                        LOG.debug("Could not rename unhealthy new container %s; will remove after rollback", new_id)
                     client.api.rename(temp_old_name, original_name)
                     client.api.start(container.id)
                 except DockerException as rollback_error:
@@ -696,6 +769,7 @@ def run_once(
     current_time = timestamp or now_utc()
     prune_due = _prune_due(settings, current_time)
     monitored = containers if containers is not None else select_monitored_containers(client, settings)
+    monitored = _order_by_compose(monitored)
     _track_new_containers(monitored)
     event_log: list[str] = []
     hostname = gethostname()

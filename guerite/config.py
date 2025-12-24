@@ -16,6 +16,7 @@ DEFAULT_STATE_FILE = "/tmp/guerite_state.json"
 DEFAULT_PRUNE_CRON: str | None = None
 DEFAULT_WEBHOOK_URL: str | None = None
 DEFAULT_ROLLBACK_GRACE_SECONDS = 3600
+DEFAULT_RESTART_RETRY_LIMIT = 3
 
 
 ALL_NOTIFICATION_EVENTS: Set[str] = {
@@ -49,6 +50,7 @@ class Settings:
     state_file: str
     prune_cron: Optional[str]
     rollback_grace_seconds: int
+    restart_retry_limit: int
 
 
 def load_settings() -> Settings:
@@ -75,6 +77,10 @@ def load_settings() -> Settings:
         rollback_grace_seconds=_env_int(
             "GUERITE_ROLLBACK_GRACE_SECONDS",
             DEFAULT_ROLLBACK_GRACE_SECONDS,
+        ),
+        restart_retry_limit=_env_int(
+            "GUERITE_RESTART_RETRY_LIMIT",
+            DEFAULT_RESTART_RETRY_LIMIT,
         ),
     )
 
