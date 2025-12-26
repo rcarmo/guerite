@@ -31,6 +31,7 @@ _KNOWN_CONTAINERS: set[str] = set()
 _KNOWN_INITIALIZED = False
 _PENDING_DETECTS: list[str] = []
 _LAST_DETECT_NOTIFY: Optional[datetime] = None
+_GUERITE_CREATED: set[str] = set()
 _RESTART_BACKOFF: dict[str, datetime] = {}
 _RESTART_FAIL_COUNT: dict[str, int] = {}
 _LAST_ACTION: dict[str, datetime] = {}
@@ -250,8 +251,6 @@ def _preflight_mounts(name: str, mounts: list[dict], notify: bool, event_log: li
             source = mount.get("Source")
             if source and not exists(source):
                 LOG.debug("Cannot validate bind source %s for %s; path not visible here; recreate may fail", source, name)
-                if notify:
-                    event_log.append(f"Cannot validate bind source for {name}: {source}")
         elif mount_type == "volume":
             driver = mount.get("Driver")
             if driver and driver != "local":
@@ -465,7 +464,7 @@ def next_prune_time(settings: Settings, reference: datetime) -> Optional[datetim
 
 
 def _track_new_containers(containers: list[Container]) -> None:
-    global _KNOWN_INITIALIZED
+    global _KNOWN_INITIALIZED, _GUERITE_CREATED
     if not _KNOWN_INITIALIZED:
         for container in containers:
             _KNOWN_CONTAINERS.add(container.id)
@@ -474,7 +473,11 @@ def _track_new_containers(containers: list[Container]) -> None:
     for container in containers:
         if container.id not in _KNOWN_CONTAINERS:
             _KNOWN_CONTAINERS.add(container.id)
-            _PENDING_DETECTS.append(container.name)
+            # Don't notify about containers we created
+            if container.id not in _GUERITE_CREATED:
+                _PENDING_DETECTS.append(container.name)
+            else:
+                _GUERITE_CREATED.discard(container.id)
 
 
 def _short_id(identifier: Optional[str]) -> str:
@@ -483,13 +486,21 @@ def _short_id(identifier: Optional[str]) -> str:
     return identifier.split(":")[-1][:12]
 
 
-def _normalize_links_value(raw_links: Optional[Any]) -> Optional[list[str]]:
+def _normalize_links_value(raw_links: Optional[Any]) -> Optional[dict[str, str]]:
     if raw_links in (None, False):
         return None
-    if isinstance(raw_links, (list, tuple)):
-        return list(raw_links)
     if isinstance(raw_links, dict):
-        return [f"{src}:{dest}" if dest else src for src, dest in raw_links.items()]
+        return raw_links
+    if isinstance(raw_links, (list, tuple)):
+        # Convert list of "container:alias" strings to dict
+        result = {}
+        for link in raw_links:
+            if isinstance(link, str) and ":" in link:
+                parts = link.split(":", 1)
+                result[parts[0]] = parts[1]
+            elif isinstance(link, str):
+                result[link] = link
+        return result if result else None
     # Unknown shape; skip to avoid docker SDK unpack errors
     return None
 
@@ -635,6 +646,8 @@ def restart_container(
                         raise
         client.api.rename(new_id, original_name)
         client.api.start(new_id)
+        # Track this container as created by Guerite
+        _GUERITE_CREATED.add(new_id)
         LOG.info("Restarted %s", original_name)
         if notify:
             event_log.append(f"Creating container {original_name} ({_short_id(new_image_id)})")

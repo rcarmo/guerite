@@ -153,7 +153,7 @@ def main() -> None:
             if summary:
                 LOG.info("Upcoming checks: %s", "; ".join(summary))
                 if "startup" in settings.notifications:
-                    notify_pushover(settings, f"Guerite on {hostname}", "Next checks:\n" + "\n".join(summary))
+                    notify_pushover(settings, f"Guerite on {hostname}", "Starting Guerite, checks scheduled for:\n" + "\n".join(summary))
             else:
                 LOG.info("No upcoming checks found")
             logged_schedule = True
