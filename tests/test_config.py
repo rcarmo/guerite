@@ -1,4 +1,3 @@
-import os
 from datetime import timezone
 
 from guerite import utils

@@ -2,7 +2,6 @@ from http.client import HTTPConnection
 from http.client import HTTPSConnection
 from json import dumps
 from logging import getLogger
-from typing import Optional
 from urllib.parse import urlencode, urlsplit
 
 from .config import Settings

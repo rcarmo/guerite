@@ -1,9 +1,5 @@
 """Tests for recent bug fixes and enhancements."""
 
-from typing import Optional
-
-import pytest
-
 from guerite import monitor
 from tests.conftest import DummyContainer, DummyImage
 

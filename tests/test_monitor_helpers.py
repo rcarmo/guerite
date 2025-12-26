@@ -1,7 +1,5 @@
 from datetime import datetime, timedelta, timezone
 
-import pytest
-
 from guerite.config import Settings
 from guerite import monitor
 from tests.conftest import DummyContainer

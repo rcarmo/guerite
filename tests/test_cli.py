@@ -1,6 +1,3 @@
-import threading
-from types import SimpleNamespace
-
 import pytest
 
 import guerite.__main__ as main_mod

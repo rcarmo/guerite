@@ -9,6 +9,11 @@ dependencies = [
     "croniter>=2.0.0",
 ]
 
+[project.optional-dependencies]
+dev = [
+    "ruff>=0.12.0",
+]
+
 [project.scripts]
 guerite = "guerite.__main__:main"
 

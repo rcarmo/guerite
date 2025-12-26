@@ -129,8 +129,6 @@ def main() -> None:
     current_reason_name: Optional[str] = None
     current_reason_label: Optional[str] = None
     current_reason_source: Optional[str] = "startup"
-    next_reason_name: Optional[str] = None
-    next_reason_label: Optional[str] = None
     while True:
         timestamp = now_tz(settings.timezone)
         containers = select_monitored_containers(client, settings)
