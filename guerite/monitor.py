@@ -7,7 +7,7 @@ from json import dump
 from json import load
 from logging import getLogger
 from os.path import exists
-from socket import gethostname
+
 from typing import Any, Optional
 from time import sleep
 from dataclasses import dataclass
@@ -1235,7 +1235,7 @@ def run_once(
     monitored = _order_by_compose(monitored, settings)
     _track_new_containers(monitored)
     event_log: list[str] = []
-    hostname = gethostname()
+    hostname = settings.hostname
     base_map = {_base_name(container): container for container in monitored}
     for container in monitored:
         deps = _label_dependencies(container, settings) | _link_targets(container)

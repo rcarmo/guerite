@@ -54,6 +54,7 @@ def settings() -> Settings:
         restart_retry_limit=3,
         depends_label="guerite.depends_on",
         action_cooldown_seconds=60,
+        hostname="testhost",
     )
 
 
@@ -202,6 +203,7 @@ def restart_settings(tmp_path) -> Settings:
         restart_retry_limit=3,
         depends_label="guerite.depends_on",
         action_cooldown_seconds=60,
+        hostname="testhost",
     )
 
 

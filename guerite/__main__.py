@@ -1,7 +1,7 @@
 from datetime import timedelta
 from logging import getLogger
 from math import ceil
-from socket import gethostname
+
 from threading import Event, Thread
 from time import sleep
 from typing import Optional
@@ -125,7 +125,7 @@ def main() -> None:
     wake_signal = Event()
     start_event_listener(client, settings, wake_signal)
     logged_schedule = False
-    hostname = gethostname()
+    hostname = settings.hostname
     current_reason_name: Optional[str] = None
     current_reason_label: Optional[str] = None
     current_reason_source: Optional[str] = "startup"
