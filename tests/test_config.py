@@ -100,6 +100,7 @@ def test_prune_images_applies_and_restores_timeout():
         restart_retry_limit=3,
         depends_label="guerite.depends_on",
         action_cooldown_seconds=60,
+        hostname="testhost",
     )
 
     client = DummyClient()

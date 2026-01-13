@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 from os import getenv
+from socket import gethostname
 from typing import Optional, Set
 
 DEFAULT_UPDATE_LABEL = "guerite.update"
@@ -59,6 +60,7 @@ class Settings:
     restart_retry_limit: int
     depends_label: str
     action_cooldown_seconds: int
+    hostname: str
 
 
 def load_settings() -> Settings:
@@ -103,6 +105,7 @@ def load_settings() -> Settings:
             "GUERITE_ACTION_COOLDOWN_SECONDS",
             DEFAULT_ACTION_COOLDOWN_SECONDS,
         ),
+        hostname=getenv("GUERITE_HOSTNAME", gethostname()),
     )
 
 
