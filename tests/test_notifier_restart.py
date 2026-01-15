@@ -66,7 +66,7 @@ def test_notify_pushover_skips_when_missing(settings: Settings, caplog):
 
 def test_notify_pushover_sends_and_warns(monkeypatch, settings: Settings, caplog):
     fake = FakeConnection(status=500, reason="boom")
-    monkeypatch.setattr(notifier, "HTTPSConnection", lambda netloc: fake)
+    monkeypatch.setattr(notifier, "HTTPSConnection", lambda netloc, timeout=None: fake)
     caplog.set_level("WARNING")
     notifier.notify_pushover(settings, "title", "body")
     assert any("Pushover returned" in msg for msg in caplog.messages)
@@ -86,7 +86,7 @@ def test_notify_webhook_skips_when_missing(settings: Settings, caplog):
 
 def test_notify_webhook_sends(monkeypatch, settings: Settings, caplog):
     fake = FakeConnection(status=200)
-    monkeypatch.setattr(notifier, "HTTPSConnection", lambda netloc: fake)
+    monkeypatch.setattr(notifier, "HTTPSConnection", lambda netloc, timeout=None: fake)
     notifier.notify_webhook(settings, "title", "body")
     assert fake.calls and fake.calls[-1] == "closed"
     method, path, body, headers = fake.calls[0]

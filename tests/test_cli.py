@@ -61,7 +61,7 @@ def test_build_client_failure(monkeypatch, settings: Settings):
 def test_main_loop_runs_single_iteration(monkeypatch, settings: Settings):
     monkeypatch.setattr(main_mod, "load_settings", lambda: settings)
     monkeypatch.setattr(main_mod, "configure_logging", lambda level: None)
-    monkeypatch.setattr(main_mod, "build_client", lambda cfg: DummyClient())
+    monkeypatch.setattr(main_mod, "build_client_with_retry", lambda cfg: DummyClient())
     monkeypatch.setattr(main_mod, "start_event_listener", lambda client, cfg, signal: None)
     monkeypatch.setattr(main_mod, "select_monitored_containers", lambda client, cfg: [])
     monkeypatch.setattr(main_mod, "schedule_summary", lambda containers, cfg, reference: [])

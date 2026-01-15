@@ -66,7 +66,7 @@ def test_notify_pushover_skips_when_missing(settings: Settings, caplog):
 
 def test_notify_pushover_sends_and_warns(monkeypatch, settings: Settings, caplog):
     fake = FakeConnection(status=500, reason="boom")
-    monkeypatch.setattr(notifier, "HTTPSConnection", lambda netloc: fake)
+    monkeypatch.setattr(notifier, "HTTPSConnection", lambda netloc, timeout=None: fake)
     caplog.set_level("WARNING")
     notifier.notify_pushover(settings, "title", "body")
     assert any("Pushover returned" in msg for msg in caplog.messages)
@@ -86,7 +86,7 @@ def test_notify_webhook_skips_when_missing(settings: Settings, caplog):
 
 def test_notify_webhook_sends(monkeypatch, settings: Settings, caplog):
     fake = FakeConnection(status=200)
-    monkeypatch.setattr(notifier, "HTTPSConnection", lambda netloc: fake)
+    monkeypatch.setattr(notifier, "HTTPSConnection", lambda netloc, timeout=None: fake)
     notifier.notify_webhook(settings, "title", "body")
     assert fake.calls and fake.calls[-1] == "closed"
     method, path, body, headers = fake.calls[0]
@@ -119,7 +119,9 @@ class DummyAPI:
     def create_networking_config(self, *args, **kwargs):  # pragma: no cover - unused
         return {}
 
-    def connect_container_to_network(self, *args, **kwargs):  # pragma: no cover - unused
+    def connect_container_to_network(
+        self, *args, **kwargs
+    ):  # pragma: no cover - unused
         if self.fail_connect:
             raise monitor.APIError("fail", None, None)  # type: ignore[arg-type]
         self.calls.append(("connect", args, kwargs))
@@ -160,7 +162,10 @@ class DummyContainer:
         self.id = f"{name}-id"
         self.labels = {}
         self.attrs = {
-            "Config": {"Image": "repo:tag", "Healthcheck": {"Test": ["CMD-SHELL", "true"]} if healthcheck else None},
+            "Config": {
+                "Image": "repo:tag",
+                "Healthcheck": {"Test": ["CMD-SHELL", "true"]} if healthcheck else None,
+            },
             "HostConfig": {},
             "NetworkSettings": {"Networks": {}},
             "State": {"Health": {"Status": "healthy"}},
@@ -226,15 +231,18 @@ def test_restart_container_happy_path(monkeypatch, restart_settings: Settings):
     container = DummyContainer("app")
 
     event_log = []
-    assert monitor.restart_container(
-        client,
-        container,
-        image_ref="repo:tag",
-        new_image_id="new-img",
-        settings=restart_settings,
-        event_log=event_log,
-        notify=True,
-    ) is True
+    assert (
+        monitor.restart_container(
+            client,
+            container,
+            image_ref="repo:tag",
+            new_image_id="new-img",
+            settings=restart_settings,
+            event_log=event_log,
+            notify=True,
+        )
+        is True
+    )
     # rename old, create new, start new, remove old
     first_call = client.api.calls[0]
     assert first_call[0] == "rename" and first_call[1] == container.id
@@ -248,7 +256,9 @@ def test_restart_container_health_rollback(monkeypatch, restart_settings: Settin
     container = DummyContainer("app", healthcheck=True)
 
     # Force health wait to fail
-    monkeypatch.setattr(monitor, "_wait_for_healthy", lambda *args, **kwargs: (False, "unhealthy"))
+    monkeypatch.setattr(
+        monitor, "_wait_for_healthy", lambda *args, **kwargs: (False, "unhealthy")
+    )
 
     event_log = []
     result = monitor.restart_container(
@@ -261,10 +271,15 @@ def test_restart_container_health_rollback(monkeypatch, restart_settings: Settin
         notify=True,
     )
     assert result is False
-    assert any("Rolled back" in entry or "Failed health rollback" in entry for entry in event_log)
+    assert any(
+        "Rolled back" in entry or "Failed health rollback" in entry
+        for entry in event_log
+    )
 
 
-def test_restart_container_network_priority_fallback(monkeypatch, restart_settings: Settings):
+def test_restart_container_network_priority_fallback(
+    monkeypatch, restart_settings: Settings
+):
     client = DummyClient()
     container = DummyContainer("app")
     # Provide a network with priority to trigger fallback
@@ -279,15 +294,18 @@ def test_restart_container_network_priority_fallback(monkeypatch, restart_settin
     }
 
     event_log = []
-    assert monitor.restart_container(
-        client,
-        container,
-        image_ref="repo:tag",
-        new_image_id="new-img",
-        settings=restart_settings,
-        event_log=event_log,
-        notify=False,
-    ) is True
+    assert (
+        monitor.restart_container(
+            client,
+            container,
+            image_ref="repo:tag",
+            new_image_id="new-img",
+            settings=restart_settings,
+            event_log=event_log,
+            notify=False,
+        )
+        is True
+    )
     # Ensure priority was stripped and links normalized to dict format
     assert "priority" not in client.api.endpoint_kwargs
     assert client.api.endpoint_kwargs.get("links") == {"svc": "alias"}
@@ -347,7 +365,9 @@ def test_restart_container_connect_success(monkeypatch, restart_settings: Settin
     assert any(call[0] == "connect" for call in client.api.calls)
 
 
-def test_restart_container_rollback_removes_new_before_restoring_old_on_late_failure(restart_settings: Settings):
+def test_restart_container_rollback_removes_new_before_restoring_old_on_late_failure(
+    restart_settings: Settings,
+):
     client = DummyClient()
     container = DummyContainer("app", remove_raises=RuntimeError("boom"))
 
@@ -383,7 +403,9 @@ def test_restart_container_rollback_removes_new_before_restoring_old_on_late_fai
     assert idx_rename_new_back < idx_remove_new < idx_restore_old_name
 
 
-def test_restart_container_rollback_remove_failure_triggers_rename_away_and_retry(restart_settings: Settings):
+def test_restart_container_rollback_remove_failure_triggers_rename_away_and_retry(
+    restart_settings: Settings,
+):
     client = DummyClient()
     client.api.remove_failures_remaining = 1
     container = DummyContainer("app", remove_raises=RuntimeError("boom"))
@@ -403,13 +425,19 @@ def test_restart_container_rollback_remove_failure_triggers_rename_away_and_retr
     # First rollback attempt to remove fails, then we rename-away and retry remove
     calls = client.api.calls
     assert ("rename", "new-id", "app-guerite-failed-new-id") in calls
-    remove_calls = [call for call in calls if call[0] == "remove" and call[1] == "new-id"]
+    remove_calls = [
+        call for call in calls if call[0] == "remove" and call[1] == "new-id"
+    ]
     assert len(remove_calls) == 2
 
 
-def test_restart_container_rollback_starts_old_container_even_if_stop_failed(restart_settings: Settings):
+def test_restart_container_rollback_starts_old_container_even_if_stop_failed(
+    restart_settings: Settings,
+):
     client = DummyClient()
-    container = DummyContainer("app", stop_raises=True, remove_raises=RuntimeError("boom"))
+    container = DummyContainer(
+        "app", stop_raises=True, remove_raises=RuntimeError("boom")
+    )
 
     event_log: list[str] = []
     result = monitor.restart_container(
@@ -450,9 +478,11 @@ def test_remove_old_image_warns_on_failure(caplog):
 def test_prune_success_logs(monkeypatch, restart_settings: Settings):
     client = DummyClient()
     client.api.prune_images_called = False
+
     def fake_prune_images(**kwargs):
         client.api.prune_images_called = True
         return {"SpaceReclaimed": 123, "ImagesDeleted": ["sha256:abc"]}
+
     client.api.prune_images = fake_prune_images
     client.containers.list = lambda all=True: []
     event_log: list[str] = []
@@ -464,10 +494,14 @@ def test_prune_success_logs(monkeypatch, restart_settings: Settings):
 def test_prune_list_containers_failure(caplog, restart_settings: Settings):
     caplog.set_level("WARNING")
     client = DummyClient()
+
     def broken_list(all=True):
         raise monitor.DockerException("list failed")
+
     client.containers.list = broken_list
     event_log: list[str] = []
     monitor.prune_images(client, restart_settings, event_log, notify=True)
     assert any("Skipping prune" in entry for entry in event_log)
-    assert any("Skipping prune; could not list containers" in msg for msg in caplog.messages)
+    assert any(
+        "Skipping prune; could not list containers" in msg for msg in caplog.messages
+    )
