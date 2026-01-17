@@ -25,6 +25,7 @@ DEFAULT_UPGRADE_STALL_TIMEOUT_SECONDS = 1800
 DEFAULT_DOCKER_CONNECT_RETRIES = 5
 DEFAULT_DOCKER_CONNECT_BACKOFF_SECONDS = 5
 DEFAULT_NOTIFICATION_TIMEOUT_SECONDS = 30
+DEFAULT_STOP_TIMEOUT_SECONDS = 120
 
 
 ALL_NOTIFICATION_EVENTS: Set[str] = {
@@ -66,6 +67,7 @@ class Settings:
     upgrade_stall_timeout_seconds: int = DEFAULT_UPGRADE_STALL_TIMEOUT_SECONDS
     docker_connect_retries: int = DEFAULT_DOCKER_CONNECT_RETRIES
     docker_connect_backoff_seconds: int = DEFAULT_DOCKER_CONNECT_BACKOFF_SECONDS
+    stop_timeout_seconds: int = DEFAULT_STOP_TIMEOUT_SECONDS
 
 
 def load_settings() -> Settings:
@@ -120,6 +122,10 @@ def load_settings() -> Settings:
         docker_connect_backoff_seconds=_env_int(
             "GUERITE_DOCKER_CONNECT_BACKOFF_SECONDS",
             DEFAULT_DOCKER_CONNECT_BACKOFF_SECONDS,
+        ),
+        stop_timeout_seconds=_env_int(
+            "GUERITE_STOP_TIMEOUT_SECONDS",
+            DEFAULT_STOP_TIMEOUT_SECONDS,
         ),
     )
 

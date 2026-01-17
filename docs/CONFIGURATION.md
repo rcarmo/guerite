@@ -35,6 +35,7 @@ This document provides a complete reference of all environment variables used to
 | `GUERITE_HEALTH_CHECK_BACKOFF_SECONDS` | `300`   | Minimum seconds between health-based restarts per container.                                             |
 | `GUERITE_HEALTH_CHECK_TIMEOUT_SECONDS` | `60`    | Maximum seconds to wait for a recreated container to become `healthy` before triggering rollback.        |
 | `GUERITE_PRUNE_TIMEOUT_SECONDS`        | `180`   | Docker API timeout (in seconds) used for image pruning. |
+| `GUERITE_STOP_TIMEOUT_SECONDS`         | `120`   | Timeout (in seconds) for stopping containers during updates. On timeout, retries once with double the timeout, then force-kills. |
 | `GUERITE_ACTION_COOLDOWN_SECONDS`      | `60`    | Minimum seconds between actions on the same container name to avoid repeated triggers in a short window. |
 | `GUERITE_ROLLBACK_GRACE_SECONDS`       | `3600`  | Keep temporary rollback containers/images for at least this many seconds before allowing prune cleanup.  |
 | `GUERITE_RESTART_RETRY_LIMIT`          | `3`     | Maximum consecutive restart/recreate attempts before backing off harder for that container.              |

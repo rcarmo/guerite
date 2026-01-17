@@ -46,7 +46,7 @@ class DummyContainer:
         self.started = False
         self.removed = False
 
-    def stop(self):
+    def stop(self, timeout=None):
         self.stopped = True
 
     def start(self):
