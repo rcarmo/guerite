@@ -3,7 +3,7 @@
 
 import pytest
 from datetime import datetime, timedelta, timezone
-from unittest.mock import Mock, MagicMock, patch
+from unittest.mock import Mock, patch
 
 from guerite.monitor import (
     UpgradeState,
@@ -11,8 +11,9 @@ from guerite.monitor import (
     _get_tracked_upgrade_state,
     _clear_tracked_upgrade_state,
     _recover_stalled_upgrades,
+    _reconcile_failed_upgrades,
+    _check_for_manual_intervention,
     restart_container,
-    _strip_guerite_suffix,
 )
 from guerite.config import Settings
 
@@ -314,7 +315,7 @@ class TestUpgradeIntegration:
         event_log = []
 
         # Execute with is_upgrade=True
-        result = restart_container(
+        restart_container(
             client,
             container,
             "test:latest",
@@ -435,6 +436,468 @@ class TestUpgradeIntegration:
         # Verify no upgrade state was tracked
         upgrade_state = _get_tracked_upgrade_state("container123")
         assert upgrade_state is None
+
+
+class TestFailedUpgradeReconciliation:
+    """Test failed upgrade reconciliation with manual updates."""
+
+    def setup_method(self):
+        """Clear upgrade state before each test."""
+        from guerite import monitor
+
+        monitor._UPGRADE_STATE.clear()
+        monitor._UPGRADE_STATE_NOTIFIED.clear()
+        monitor._RESTART_BACKOFF.clear()
+        monitor._RESTART_FAIL_COUNT.clear()
+
+    def test_manual_upgrade_clears_failed_state(self):
+        """Clear failed upgrade state when container image changes."""
+        container_id = "container123"
+        upgrade_state = UpgradeState(
+            original_image_id="old123",
+            target_image_id="new456",
+            status="failed",
+            base_name="app",
+        )
+        _track_upgrade_state(container_id, upgrade_state)
+
+        container = Mock()
+        container.id = container_id
+        container.name = "app"
+        container.image.id = "new456"
+
+        client = Mock()
+        client.containers.get.return_value = container
+
+        event_log = []
+        _reconcile_failed_upgrades(client, {"app": container}, event_log, True)
+
+        assert _get_tracked_upgrade_state(container_id) is None
+        assert len(event_log) == 1
+        assert "manual upgrade" in event_log[0].lower()
+
+    def test_no_change_keeps_failed_state(self):
+        """Retain failed upgrade state if image unchanged."""
+        container_id = "container123"
+        upgrade_state = UpgradeState(
+            original_image_id="old123",
+            target_image_id="new456",
+            status="failed",
+            base_name="app",
+        )
+        _track_upgrade_state(container_id, upgrade_state)
+
+        container = Mock()
+        container.id = container_id
+        container.name = "app"
+        container.image.id = "old123"
+
+        client = Mock()
+        client.containers.get.return_value = container
+
+        event_log = []
+        _reconcile_failed_upgrades(client, {"app": container}, event_log, True)
+
+        assert _get_tracked_upgrade_state(container_id) is not None
+        assert event_log == []
+
+    def test_container_found_by_base_name_after_recreate(self):
+        """Find container by base_name when ID lookup fails (container recreated)."""
+        from docker.errors import NotFound
+        from guerite import monitor
+
+        old_container_id = "old_container_id"
+        new_container_id = "new_container_id"
+        upgrade_state = UpgradeState(
+            original_image_id="old123",
+            target_image_id="new456",
+            status="failed",
+            base_name="app",
+        )
+        _track_upgrade_state(old_container_id, upgrade_state)
+        monitor._RESTART_BACKOFF[old_container_id] = 100.0
+
+        new_container = Mock()
+        new_container.id = new_container_id
+        new_container.name = "app"
+        new_container.image.id = "new456"
+
+        client = Mock()
+        client.containers.get.side_effect = NotFound("not found")
+
+        event_log = []
+        _reconcile_failed_upgrades(client, {"app": new_container}, event_log, True)
+
+        assert _get_tracked_upgrade_state(old_container_id) is None
+        assert old_container_id not in monitor._RESTART_BACKOFF
+        assert new_container_id not in monitor._RESTART_BACKOFF
+
+    def test_base_name_backfill_persists_state(self):
+        """Backfill base_name when missing and persist to state file."""
+        from guerite import monitor
+        from unittest.mock import patch
+
+        container_id = "container123"
+        upgrade_state = UpgradeState(
+            original_image_id="old123",
+            target_image_id="new456",
+            status="failed",
+            base_name=None,
+        )
+        _track_upgrade_state(container_id, upgrade_state)
+
+        container = Mock()
+        container.id = container_id
+        container.name = "myapp"
+        container.image.id = "old123"  # Still on original, no clear
+
+        client = Mock()
+        client.containers.get.return_value = container
+
+        with patch.object(monitor, "_save_upgrade_state") as mock_save:
+            _reconcile_failed_upgrades(
+                client, {"myapp": container}, [], True, state_file="/tmp/state.json"
+            )
+            mock_save.assert_called_once_with("/tmp/state.json")
+
+        state = _get_tracked_upgrade_state(container_id)
+        assert state is not None
+        assert state.base_name == "myapp"
+
+    def test_backoff_cleanup_for_both_ids(self):
+        """Clear backoff for both tracked ID and current container ID."""
+        from guerite import monitor
+
+        old_id = "old_container_id"
+        new_id = "new_container_id"
+        upgrade_state = UpgradeState(
+            original_image_id="old123",
+            target_image_id="new456",
+            status="failed",
+            base_name="app",
+        )
+        _track_upgrade_state(old_id, upgrade_state)
+        monitor._RESTART_BACKOFF[old_id] = 100.0
+        monitor._RESTART_BACKOFF[new_id] = 200.0
+        monitor._RESTART_FAIL_COUNT[old_id] = 3
+        monitor._RESTART_FAIL_COUNT[new_id] = 2
+
+        container = Mock()
+        container.id = new_id
+        container.name = "app"
+        container.image.id = "new456"
+
+        client = Mock()
+        client.containers.get.return_value = container
+
+        _reconcile_failed_upgrades(client, {"app": container}, [], True)
+
+        assert old_id not in monitor._RESTART_BACKOFF
+        assert new_id not in monitor._RESTART_BACKOFF
+        assert old_id not in monitor._RESTART_FAIL_COUNT
+        assert new_id not in monitor._RESTART_FAIL_COUNT
+
+    def test_notify_false_no_event_log(self):
+        """No event_log entry when notify is False."""
+        container_id = "container123"
+        upgrade_state = UpgradeState(
+            original_image_id="old123",
+            target_image_id="new456",
+            status="failed",
+            base_name="app",
+        )
+        _track_upgrade_state(container_id, upgrade_state)
+
+        container = Mock()
+        container.id = container_id
+        container.name = "app"
+        container.image.id = "new456"
+
+        client = Mock()
+        client.containers.get.return_value = container
+
+        event_log = []
+        _reconcile_failed_upgrades(client, {"app": container}, event_log, False)
+
+        assert _get_tracked_upgrade_state(container_id) is None
+        assert event_log == []
+
+    def test_non_failed_status_skipped(self):
+        """Upgrades with non-failed status are ignored."""
+        from guerite import monitor
+
+        for status in ["in-progress", "completed", "unknown"]:
+            monitor._UPGRADE_STATE.clear()
+            container_id = f"container_{status}"
+            upgrade_state = UpgradeState(
+                original_image_id="old123",
+                target_image_id="new456",
+                status=status,
+                base_name="app",
+            )
+            _track_upgrade_state(container_id, upgrade_state)
+
+            container = Mock()
+            container.id = container_id
+            container.name = "app"
+            container.image.id = "new456"
+
+            client = Mock()
+            client.containers.get.return_value = container
+
+            _reconcile_failed_upgrades(client, {"app": container}, [], True)
+
+            assert _get_tracked_upgrade_state(container_id) is not None
+
+    def test_no_original_id_with_target_mismatch_skipped(self):
+        """Skip when no original_id but current doesn't match target."""
+        container_id = "container123"
+        upgrade_state = UpgradeState(
+            original_image_id=None,
+            target_image_id="new456",
+            status="failed",
+            base_name="app",
+        )
+        _track_upgrade_state(container_id, upgrade_state)
+
+        container = Mock()
+        container.id = container_id
+        container.name = "app"
+        container.image.id = "some_other_image"
+
+        client = Mock()
+        client.containers.get.return_value = container
+
+        event_log = []
+        _reconcile_failed_upgrades(client, {"app": container}, event_log, True)
+
+        assert _get_tracked_upgrade_state(container_id) is not None
+        assert event_log == []
+
+    def test_current_image_id_none_skipped(self):
+        """Skip when current_image_id returns None."""
+        container_id = "container123"
+        upgrade_state = UpgradeState(
+            original_image_id="old123",
+            target_image_id="new456",
+            status="failed",
+            base_name="app",
+        )
+        _track_upgrade_state(container_id, upgrade_state)
+
+        container = Mock()
+        container.id = container_id
+        container.name = "app"
+        container.image.id = None  # Will cause current_image_id to return None
+
+        client = Mock()
+        client.containers.get.return_value = container
+
+        event_log = []
+        _reconcile_failed_upgrades(client, {"app": container}, event_log, True)
+
+        assert _get_tracked_upgrade_state(container_id) is not None
+
+    def test_container_not_found_anywhere_skipped(self):
+        """Skip when container not found by ID or base_name."""
+        from docker.errors import NotFound
+
+        container_id = "container123"
+        upgrade_state = UpgradeState(
+            original_image_id="old123",
+            target_image_id="new456",
+            status="failed",
+            base_name="app",
+        )
+        _track_upgrade_state(container_id, upgrade_state)
+
+        client = Mock()
+        client.containers.get.side_effect = NotFound("not found")
+
+        event_log = []
+        _reconcile_failed_upgrades(client, {}, event_log, True)  # Empty base_map
+
+        assert _get_tracked_upgrade_state(container_id) is not None
+
+    def test_clears_upgrade_state_notified(self):
+        """Verify _UPGRADE_STATE_NOTIFIED is cleared on reconciliation."""
+        from guerite import monitor
+
+        container_id = "container123"
+        upgrade_state = UpgradeState(
+            original_image_id="old123",
+            target_image_id="new456",
+            status="failed",
+            base_name="app",
+        )
+        _track_upgrade_state(container_id, upgrade_state)
+        monitor._UPGRADE_STATE_NOTIFIED.add(container_id)
+
+        container = Mock()
+        container.id = container_id
+        container.name = "app"
+        container.image.id = "new456"
+
+        client = Mock()
+        client.containers.get.return_value = container
+
+        _reconcile_failed_upgrades(client, {"app": container}, [], True)
+
+        assert container_id not in monitor._UPGRADE_STATE_NOTIFIED
+
+
+class TestCheckForManualIntervention:
+    """Test _check_for_manual_intervention function."""
+
+    def setup_method(self):
+        """Clear upgrade state before each test."""
+        from guerite import monitor
+
+        monitor._UPGRADE_STATE.clear()
+        monitor._UPGRADE_STATE_NOTIFIED.clear()
+
+    def test_notifies_failed_upgrade(self):
+        """Notify about failed upgrade requiring manual intervention."""
+        from guerite import monitor
+
+        container_id = "container123"
+        upgrade_state = UpgradeState(
+            original_image_id="old123",
+            target_image_id="new456",
+            status="failed",
+            base_name="app",
+        )
+        _track_upgrade_state(container_id, upgrade_state)
+
+        container = Mock()
+        container.id = container_id
+        container.name = "app"
+
+        client = Mock()
+        client.containers.get.return_value = container
+
+        settings = Mock()
+        event_log = []
+        _check_for_manual_intervention(client, settings, event_log, True)
+
+        assert container_id in monitor._UPGRADE_STATE_NOTIFIED
+        assert len(event_log) == 1
+        assert "manual intervention" in event_log[0].lower()
+
+    def test_skips_already_notified(self):
+        """Skip containers already notified."""
+        from guerite import monitor
+
+        container_id = "container123"
+        upgrade_state = UpgradeState(
+            original_image_id="old123",
+            target_image_id="new456",
+            status="failed",
+            base_name="app",
+        )
+        _track_upgrade_state(container_id, upgrade_state)
+        monitor._UPGRADE_STATE_NOTIFIED.add(container_id)
+
+        client = Mock()
+        settings = Mock()
+        event_log = []
+        _check_for_manual_intervention(client, settings, event_log, True)
+
+        assert event_log == []
+
+    def test_skips_non_failed_status(self):
+        """Skip upgrades with non-failed status."""
+        from guerite import monitor
+
+        container_id = "container123"
+        upgrade_state = UpgradeState(
+            original_image_id="old123",
+            target_image_id="new456",
+            status="in-progress",
+            base_name="app",
+        )
+        _track_upgrade_state(container_id, upgrade_state)
+
+        client = Mock()
+        settings = Mock()
+        event_log = []
+        _check_for_manual_intervention(client, settings, event_log, True)
+
+        assert container_id not in monitor._UPGRADE_STATE_NOTIFIED
+        assert event_log == []
+
+    def test_clears_state_for_missing_container(self):
+        """Clear upgrade state when container no longer exists."""
+        from docker.errors import NotFound
+
+        container_id = "container123"
+        upgrade_state = UpgradeState(
+            original_image_id="old123",
+            target_image_id="new456",
+            status="failed",
+            base_name="app",
+        )
+        _track_upgrade_state(container_id, upgrade_state)
+
+        client = Mock()
+        client.containers.get.side_effect = NotFound("not found")
+
+        settings = Mock()
+        event_log = []
+        _check_for_manual_intervention(client, settings, event_log, True)
+
+        assert _get_tracked_upgrade_state(container_id) is None
+
+    def test_notify_false_no_event_log(self):
+        """No event_log entry when notify is False."""
+        from guerite import monitor
+
+        container_id = "container123"
+        upgrade_state = UpgradeState(
+            original_image_id="old123",
+            target_image_id="new456",
+            status="failed",
+            base_name="app",
+        )
+        _track_upgrade_state(container_id, upgrade_state)
+
+        container = Mock()
+        container.id = container_id
+        container.name = "app"
+
+        client = Mock()
+        client.containers.get.return_value = container
+
+        settings = Mock()
+        event_log = []
+        _check_for_manual_intervention(client, settings, event_log, False)
+
+        assert container_id in monitor._UPGRADE_STATE_NOTIFIED
+        assert event_log == []
+
+    def test_uses_base_name_from_state(self):
+        """Use base_name from upgrade state when container lookup fails initially."""
+        from docker.errors import NotFound
+
+        container_id = "container123"
+        upgrade_state = UpgradeState(
+            original_image_id="old123",
+            target_image_id="new456",
+            status="failed",
+            base_name="myapp",
+        )
+        _track_upgrade_state(container_id, upgrade_state)
+
+        client = Mock()
+        # First call for name lookup fails, second call for existence check also fails
+        client.containers.get.side_effect = NotFound("not found")
+
+        settings = Mock()
+        event_log = []
+        _check_for_manual_intervention(client, settings, event_log, True)
+
+        assert len(event_log) == 1
+        assert "myapp" in event_log[0]
 
 
 if __name__ == "__main__":

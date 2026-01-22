@@ -95,6 +95,50 @@ def test_notify_webhook_sends(monkeypatch, settings: Settings, caplog):
     assert headers["Content-Type"] == "application/json"
 
 
+def test_notify_webhook_http_protocol(monkeypatch, settings: Settings):
+    """Test webhook with HTTP (not HTTPS) protocol."""
+    settings = settings.__class__(**{**settings.__dict__, "webhook_url": "http://hook.example/hit"})
+    fake = FakeConnection(status=200)
+    monkeypatch.setattr(notifier, "HTTPConnection", lambda netloc, timeout=None: fake)
+    notifier.notify_webhook(settings, "title", "body")
+    assert fake.calls and fake.calls[-1] == "closed"
+
+
+def test_notify_webhook_error_response(monkeypatch, settings: Settings, caplog):
+    """Test webhook with error response."""
+    fake = FakeConnection(status=500, reason="Internal Server Error")
+    monkeypatch.setattr(notifier, "HTTPSConnection", lambda netloc, timeout=None: fake)
+    caplog.set_level("WARNING")
+    notifier.notify_webhook(settings, "title", "body")
+    assert any("Webhook returned" in msg for msg in caplog.messages)
+
+
+def test_notify_webhook_oserror(monkeypatch, settings: Settings, caplog):
+    """Test webhook with OSError during request."""
+    class FailingConnection:
+        def request(self, *args, **kwargs):
+            raise OSError("Connection refused")
+        def close(self):
+            pass
+    monkeypatch.setattr(notifier, "HTTPSConnection", lambda netloc, timeout=None: FailingConnection())
+    caplog.set_level("WARNING")
+    notifier.notify_webhook(settings, "title", "body")
+    assert any("Failed to send webhook" in msg for msg in caplog.messages)
+
+
+def test_notify_pushover_oserror(monkeypatch, settings: Settings, caplog):
+    """Test pushover with OSError during request."""
+    class FailingConnection:
+        def request(self, *args, **kwargs):
+            raise OSError("Connection refused")
+        def close(self):
+            pass
+    monkeypatch.setattr(notifier, "HTTPSConnection", lambda netloc, timeout=None: FailingConnection())
+    caplog.set_level("WARNING")
+    notifier.notify_pushover(settings, "title", "body")
+    assert any("Failed to send Pushover" in msg for msg in caplog.messages)
+
+
 class DummyAPI:
     def __init__(self):
         self.calls = []

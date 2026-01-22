@@ -70,6 +70,7 @@ class UpgradeState:
     target_image_id: Optional[str] = None
     started_at: Optional[datetime] = None
     status: str = "unknown"  # in-progress, completed, failed
+    base_name: Optional[str] = None
 
 
 def _compose_project(container: Container) -> Optional[str]:
@@ -908,6 +909,7 @@ def _ensure_upgrade_state_loaded(state_file: str) -> None:
                         upgrade_state = UpgradeState(
                             original_image_id=state_data.get("original_image_id"),
                             target_image_id=state_data.get("target_image_id"),
+                            base_name=state_data.get("base_name"),
                             status=state_data.get("status", "unknown"),
                             started_at=datetime.fromisoformat(state_data["started_at"])
                             if state_data.get("started_at")
@@ -941,6 +943,8 @@ def _save_upgrade_state(state_file: str) -> None:
             state_dict["original_image_id"] = upgrade_state.original_image_id
         if upgrade_state.target_image_id:
             state_dict["target_image_id"] = upgrade_state.target_image_id
+        if upgrade_state.base_name:
+            state_dict["base_name"] = upgrade_state.base_name
         if upgrade_state.started_at:
             state_dict["started_at"] = upgrade_state.started_at.isoformat()
 
@@ -1033,7 +1037,7 @@ def _recover_stalled_upgrades(
     stall_threshold = getattr(settings, "upgrade_stall_timeout_seconds", 1800)
 
     stalled_containers = []
-    for container_id, upgrade_state in _UPGRADE_STATE.items():
+    for container_id, upgrade_state in list(_UPGRADE_STATE.items()):
         if upgrade_state.status != "in-progress":
             continue
         if not upgrade_state.started_at:
@@ -1061,7 +1065,11 @@ def _recover_stalled_upgrades(
 
             # Mark as failed
             upgrade_state.status = "failed"
-            _track_upgrade_state(container_id, upgrade_state, state_file=getattr(settings, "state_file", None))
+            _track_upgrade_state(
+                container_id,
+                upgrade_state,
+                state_file=getattr(settings, "state_file", None),
+            )
 
             # Log for manual intervention
             LOG.error(
@@ -1082,6 +1090,69 @@ def _recover_stalled_upgrades(
             _clear_tracked_upgrade_state(container_id)
 
 
+def _reconcile_failed_upgrades(
+    client: DockerClient,
+    base_map: dict[str, Container],
+    event_log: list[str],
+    notify: bool,
+    state_file: Optional[str] = None,
+) -> None:
+    """Clear failed upgrade state if a container was updated externally.
+
+    Detects manual upgrades by checking if the container's current image differs
+    from the original image that failed to upgrade. If the image changed, we assume
+    someone manually resolved the issue and clear the failed state.
+    """
+    if not _UPGRADE_STATE:
+        return
+    for container_id, upgrade_state in list(_UPGRADE_STATE.items()):
+        if upgrade_state.status != "failed":
+            continue
+        container = None
+        try:
+            container = client.containers.get(container_id)
+        except DockerException:
+            pass
+        # If container ID changed (recreated), try to find by base name
+        if container is None and upgrade_state.base_name:
+            container = base_map.get(upgrade_state.base_name)
+        if container is None:
+            continue
+        # Backfill base_name if missing (for upgrades tracked before this field existed)
+        if upgrade_state.base_name is None:
+            upgrade_state.base_name = _strip_guerite_suffix(container.name or "")
+            _track_upgrade_state(container_id, upgrade_state, state_file=state_file)
+        current_id = current_image_id(container)
+        if current_id is None:
+            continue
+        original_id = upgrade_state.original_image_id
+        target_id = upgrade_state.target_image_id
+        # Still on original image - no manual upgrade occurred
+        if original_id and current_id == original_id:
+            continue
+        # No original recorded but current doesn't match target - ambiguous, skip
+        if not original_id and target_id and current_id != target_id:
+            continue
+        resolved_name = _strip_guerite_suffix(
+            container.name or upgrade_state.base_name or _short_id(container_id)
+        )
+        LOG.info(
+            "Detected manual upgrade for %s; clearing failed upgrade state",
+            resolved_name,
+        )
+        if notify:
+            event_log.append(
+                f"Detected manual upgrade for {resolved_name}; clearing failed upgrade state"
+            )
+        _clear_tracked_upgrade_state(container_id)
+        _UPGRADE_STATE_NOTIFIED.discard(container_id)
+        # Clear backoff for both original tracked ID and current container ID
+        for cid in {container_id, container.id}:
+            if cid:
+                _RESTART_BACKOFF.pop(cid, None)
+                _RESTART_FAIL_COUNT.pop(cid, None)
+
+
 def _check_for_manual_intervention(
     client: DockerClient, settings: Settings, event_log: list[str], notify: bool
 ) -> None:
@@ -1092,13 +1163,13 @@ def _check_for_manual_intervention(
     if not _UPGRADE_STATE:
         return
 
-    for container_id, upgrade_state in _UPGRADE_STATE.items():
+    for container_id, upgrade_state in list(_UPGRADE_STATE.items()):
         if upgrade_state.status != "failed":
             continue
         if container_id in _UPGRADE_STATE_NOTIFIED:
             continue
 
-        base_name = _short_id(container_id)
+        base_name = upgrade_state.base_name or _short_id(container_id)
         try:
             container = client.containers.get(container_id)
             base_name = _strip_guerite_suffix(container.name or base_name)
@@ -1395,6 +1466,7 @@ def restart_container(
         upgrade_state = UpgradeState(
             original_image_id=old_image_id,
             target_image_id=new_image_id,
+            base_name=base_name,
             started_at=now_utc(),
             status="in-progress",
         )
@@ -1528,7 +1600,9 @@ def restart_container(
         # Step 10: Complete upgrade tracking if this was an upgrade
         if is_upgrade and upgrade_state and container.id:
             upgrade_state.status = "completed"
-            _track_upgrade_state(container.id, upgrade_state, state_file=settings.state_file)
+            _track_upgrade_state(
+                container.id, upgrade_state, state_file=settings.state_file
+            )
             LOG.info("Upgrade completed successfully for %s", state.original_name)
 
         return True
@@ -1574,7 +1648,9 @@ def restart_container(
         # Mark upgrade as failed if this was an upgrade
         if is_upgrade and upgrade_state and container.id:
             upgrade_state.status = "failed"
-            _track_upgrade_state(container.id, upgrade_state, state_file=settings.state_file)
+            _track_upgrade_state(
+                container.id, upgrade_state, state_file=settings.state_file
+            )
             LOG.error("Upgrade failed for %s: %s", state.original_name, error)
 
         return False
@@ -1765,6 +1841,16 @@ def run_once(
     event_log: list[str] = []
     hostname = gethostname()
     base_map = {_base_name(container): container for container in monitored}
+    try:
+        _reconcile_failed_upgrades(
+            client,
+            base_map,
+            event_log,
+            _should_notify(settings, "restart"),
+            state_file=settings.state_file,
+        )
+    except Exception as error:
+        LOG.warning("Failed to reconcile failed upgrades: %s", error)
     for container in monitored:
         deps = _label_dependencies(container, settings) | _link_targets(container)
         deps = {dep for dep in deps if dep in base_map}
