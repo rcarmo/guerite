@@ -3,7 +3,7 @@
 
 import pytest
 from datetime import datetime, timedelta, timezone
-from unittest.mock import Mock, MagicMock, patch
+from unittest.mock import Mock, patch
 
 from guerite.monitor import (
     run_once,
@@ -239,7 +239,6 @@ class TestUpgradeErrorHandling:
     @patch("guerite.monitor._short_id")
     def test_upgrade_recovery_handles_missing_container(self, mock_short_id, mock_now):
         """Test upgrade recovery handling when container is missing."""
-        from guerite import monitor
         from guerite.monitor import _recover_stalled_upgrades
 
         # Setup
@@ -291,7 +290,6 @@ class TestUpgradeConfiguration:
 
     def test_default_stall_timeout(self):
         """Test default stall timeout behavior."""
-        from guerite import monitor
         from guerite.monitor import _recover_stalled_upgrades
 
         # Setup
@@ -323,7 +321,6 @@ class TestUpgradeConfiguration:
 
     def test_custom_stall_timeout(self):
         """Test custom stall timeout behavior."""
-        from guerite import monitor
         from guerite.monitor import _recover_stalled_upgrades
 
         # Setup

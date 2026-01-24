@@ -77,7 +77,7 @@ def demonstrate_implementation():
             implementation_found["crash_recovery"] = True
             print(f"   ✅ Crash recovery capability: line {i + 1}")
 
-    print(f"\n📊 IMPLEMENTATION STATUS:")
+    print("\n📊 IMPLEMENTATION STATUS:")
     implemented_count = sum(implementation_found.values())
     total_count = len(implementation_found)
 
@@ -88,32 +88,32 @@ def demonstrate_implementation():
     print(f"\n🎯 IMPLEMENTATION SCORE: {implemented_count}/{total_count}")
 
     if implemented_count == total_count:
-        print(f"\n🎉 COMPLETE PERSISTENT UPGRADE TRACKING IMPLEMENTED!")
+        print("\n🎉 COMPLETE PERSISTENT UPGRADE TRACKING IMPLEMENTED!")
 
-        print(f"\n📋 CRASH RECOVERY WORKFLOW:")
-        print(f"   1️⃣ Upgrade starts → State tracked in memory + saved to disk")
-        print(f"   2️⃣ Guerite crashes → In-memory lost, disk state preserved")
-        print(f"   3️⃣ Guerite restarts → State loaded from disk")
-        print(f"   4️⃣ Recovery continues → Full upgrade context available")
+        print("\n📋 CRASH RECOVERY WORKFLOW:")
+        print("   1️⃣ Upgrade starts → State tracked in memory + saved to disk")
+        print("   2️⃣ Guerite crashes → In-memory lost, disk state preserved")
+        print("   3️⃣ Guerite restarts → State loaded from disk")
+        print("   4️⃣ Recovery continues → Full upgrade context available")
 
-        print(f"\n🔧 TECHNICAL IMPLEMENTATION:")
-        print(f"   💾 Separate upgrade state file: guerite_state_upgrade.json")
-        print(f"   🔄 Load on startup: _ensure_upgrade_state_loaded()")
-        print(f"   💾 Save on changes: _save_upgrade_state()")
-        print(f"   🕐 Timestamp preservation: ISO format with timezone")
-        print(f"   🏷️ Status tracking: in-progress → completed/failed")
-        print(f"   🔗 Image tracking: original_id → target_id")
-        print(f"   📊 Error handling: Graceful failure recovery")
+        print("\n🔧 TECHNICAL IMPLEMENTATION:")
+        print("   💾 Separate upgrade state file: guerite_state_upgrade.json")
+        print("   🔄 Load on startup: _ensure_upgrade_state_loaded()")
+        print("   💾 Save on changes: _save_upgrade_state()")
+        print("   🕐 Timestamp preservation: ISO format with timezone")
+        print("   🏷️ Status tracking: in-progress → completed/failed")
+        print("   🔗 Image tracking: original_id → target_id")
+        print("   📊 Error handling: Graceful failure recovery")
 
-        print(f"\n🎯 ORIGINAL CONCERN RESOLVED:")
+        print("\n🎯 ORIGINAL CONCERN RESOLVED:")
         print(
-            f"   ❌ BEFORE: 'how are we tracking containers that are being upgraded if we crash?'"
+            "   ❌ BEFORE: 'how are we tracking containers that are being upgraded if we crash?'"
         )
-        print(f"   ✅ NOW: Full persistent upgrade state with crash recovery")
+        print("   ✅ NOW: Full persistent upgrade state with crash recovery")
 
         return True
     else:
-        print(f"\n❌ INCOMPLETE IMPLEMENTATION")
+        print("\n❌ INCOMPLETE IMPLEMENTATION")
         return False
 
 
@@ -125,7 +125,7 @@ def main():
 
     implementation_ok = demonstrate_implementation()
 
-    print(f"\n📊 FINAL RESULT:")
+    print("\n📊 FINAL RESULT:")
     if implementation_ok:
         print("🎉 SUCCESS: Persistent upgrade tracking fully implemented!")
         print("\n🎯 ANSWER TO ORIGINAL QUESTION:")
