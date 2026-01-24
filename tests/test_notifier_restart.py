@@ -216,7 +216,7 @@ class DummyContainer:
         self.stop_raises = stop_raises
         self.remove_raises = remove_raises
 
-    def stop(self):
+    def stop(self, timeout=None):
         if self.stop_raises:
             raise monitor.DockerException("stop failed")
         self.stopped = True

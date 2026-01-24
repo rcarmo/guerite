@@ -1194,6 +1194,249 @@ def _check_for_manual_intervention(
             _clear_tracked_upgrade_state(container_id)
 
 
+# Track which orphaned containers we've already processed to avoid repeated recovery attempts
+_ORPHAN_RECOVERY_DONE: set[str] = set()
+
+
+def _recover_orphaned_containers(
+    client: DockerClient, settings: Settings, event_log: list[str], notify: bool
+) -> None:
+    """Recover orphaned containers left from crashed updates.
+
+    Detects containers with names matching *-guerite-new-* or *-guerite-old-*
+    patterns and resolves them:
+    - If new container exists in Created state: try to start it, rollback if it fails
+    - If old container is stopped and new is running: cleanup old container
+    - If old container exists but new doesn't: restore old container name
+    """
+    try:
+        all_containers = client.containers.list(all=True)
+    except DockerException as error:
+        LOG.warning("Could not list containers for orphan recovery: %s", error)
+        return
+
+    # Group orphaned containers by base name
+    orphans_by_base: dict[str, dict[str, Container]] = {}
+    for container in all_containers:
+        name = container.name or ""
+        recovery_info = _parse_recovery_info_from_name(name)
+        if recovery_info is None:
+            continue
+
+        base_name = recovery_info["base_name"]
+        recovery_type = recovery_info["recovery_type"]
+
+        if base_name not in orphans_by_base:
+            orphans_by_base[base_name] = {}
+        orphans_by_base[base_name][recovery_type] = container
+
+    if not orphans_by_base:
+        return
+
+    for base_name, orphans in orphans_by_base.items():
+        # Skip if we've already processed this base name in this session
+        if base_name in _ORPHAN_RECOVERY_DONE:
+            continue
+
+        new_container = orphans.get("new")
+        old_container = orphans.get("old")
+
+        # Check if a production container with base_name already exists
+        production_exists = any(
+            c.name == base_name for c in all_containers if c.name
+        )
+
+        LOG.info(
+            "Detected orphaned containers for %s: new=%s, old=%s, production_exists=%s",
+            base_name,
+            new_container.name if new_container else None,
+            old_container.name if old_container else None,
+            production_exists,
+        )
+
+        try:
+            _resolve_orphaned_update(
+                client, settings, base_name, new_container, old_container,
+                production_exists, event_log, notify
+            )
+            _ORPHAN_RECOVERY_DONE.add(base_name)
+        except Exception as error:
+            LOG.error("Failed to recover orphaned containers for %s: %s", base_name, error)
+            if notify:
+                event_log.append(
+                    f"Failed to recover orphaned containers for {base_name}: {error}"
+                )
+
+
+def _resolve_orphaned_update(
+    client: DockerClient,
+    settings: Settings,
+    base_name: str,
+    new_container: Optional[Container],
+    old_container: Optional[Container],
+    production_exists: bool,
+    event_log: list[str],
+    notify: bool,
+) -> None:
+    """Resolve an orphaned update by either completing it or rolling back."""
+
+    # Case 1: New container exists in "created" state (never started)
+    if new_container:
+        try:
+            new_state = new_container.attrs.get("State", {})
+            new_status = new_state.get("Status", "").lower()
+        except DockerException:
+            new_status = "unknown"
+
+        if new_status == "created":
+            LOG.info(
+                "Found orphaned new container %s in Created state, attempting to start",
+                new_container.name,
+            )
+
+            # Try to start the new container
+            try:
+                client.api.start(new_container.id)
+                LOG.info("Started orphaned new container %s", new_container.name)
+
+                # Wait briefly for health check if container has one
+                config = new_container.attrs.get("Config", {})
+                if config.get("Healthcheck"):
+                    health_timeout = min(settings.health_check_timeout_seconds, 60)
+                    healthy, status = _wait_for_healthy(
+                        client, new_container.id, health_timeout
+                    )
+                    if not healthy:
+                        LOG.warning(
+                            "Orphaned new container %s unhealthy (status=%s), rolling back",
+                            new_container.name,
+                            status,
+                        )
+                        raise RuntimeError(f"New container unhealthy: {status}")
+
+                # New container started successfully - complete the update
+                if not production_exists:
+                    # Rename new container to production name
+                    client.api.rename(new_container.id, base_name)
+                    _GUERITE_CREATED.add(new_container.id)
+                    LOG.info(
+                        "Renamed recovered container %s to %s",
+                        new_container.name,
+                        base_name,
+                    )
+                    if notify:
+                        event_log.append(
+                            f"Recovered orphaned container: renamed {new_container.name} to {base_name}"
+                        )
+
+                # Cleanup old container if it exists
+                if old_container:
+                    try:
+                        client.api.remove_container(old_container.id, force=True)
+                        LOG.info("Removed orphaned old container %s", old_container.name)
+                    except DockerException as e:
+                        LOG.warning(
+                            "Could not remove orphaned old container %s: %s",
+                            old_container.name,
+                            e,
+                        )
+                return
+
+            except (DockerException, RuntimeError, ReadTimeout, RequestException) as error:
+                LOG.warning(
+                    "Failed to start orphaned new container %s: %s, rolling back",
+                    new_container.name,
+                    error,
+                )
+                # Rollback: remove new container and restore old
+                try:
+                    client.api.remove_container(new_container.id, force=True)
+                    LOG.info("Removed failed new container %s during rollback", new_container.name)
+                except DockerException as e:
+                    LOG.warning("Could not remove failed new container: %s", e)
+
+                # Continue to restore old container below
+            except Exception as error:
+                if ReadTimeoutError is not None and isinstance(error, ReadTimeoutError):
+                    LOG.warning(
+                        "Timeout starting orphaned new container %s: %s, rolling back",
+                        new_container.name,
+                        error,
+                    )
+                    try:
+                        client.api.remove_container(new_container.id, force=True)
+                    except DockerException:
+                        pass
+                else:
+                    raise
+
+        elif new_status == "running":
+            # New container is already running - just need to clean up naming
+            LOG.info(
+                "Orphaned new container %s is running, completing recovery",
+                new_container.name,
+            )
+            if not production_exists:
+                try:
+                    client.api.rename(new_container.id, base_name)
+                    _GUERITE_CREATED.add(new_container.id)
+                    LOG.info("Renamed running container %s to %s", new_container.name, base_name)
+                    if notify:
+                        event_log.append(
+                            f"Recovered running container: renamed {new_container.name} to {base_name}"
+                        )
+                except DockerException as e:
+                    LOG.warning("Could not rename new container to production name: %s", e)
+
+            # Cleanup old container
+            if old_container:
+                try:
+                    client.api.remove_container(old_container.id, force=True)
+                    LOG.info("Removed orphaned old container %s", old_container.name)
+                except DockerException as e:
+                    LOG.warning("Could not remove orphaned old container: %s", e)
+            return
+
+    # Case 2: Only old container exists (new was removed or never created)
+    # Or: new container failed to start and was removed above
+    if old_container and not production_exists:
+        LOG.info(
+            "Restoring orphaned old container %s to production name %s",
+            old_container.name,
+            base_name,
+        )
+
+        try:
+            # Rename old container back to production name
+            client.api.rename(old_container.id, base_name)
+            LOG.info("Restored old container name to %s", base_name)
+
+            # Try to start it if not running
+            try:
+                old_state = old_container.attrs.get("State", {})
+                if not old_state.get("Running"):
+                    client.api.start(old_container.id)
+                    LOG.info("Restarted restored container %s", base_name)
+            except DockerException as e:
+                LOG.warning("Could not start restored container %s: %s", base_name, e)
+
+            if notify:
+                event_log.append(
+                    f"Restored orphaned container {old_container.name} to {base_name}"
+                )
+
+        except DockerException as error:
+            LOG.error(
+                "Failed to restore orphaned old container %s: %s",
+                old_container.name,
+                error,
+            )
+            if notify:
+                event_log.append(
+                    f"CRITICAL: Failed to restore orphaned container {old_container.name}: {error}"
+                )
+
+
 def _rollback_container_recreation(
     client: DockerClient, state: ContainerRecreateState, container: Container
 ) -> bool:
@@ -1519,16 +1762,82 @@ def restart_container(
                 f"Stopping container {state.original_name} ({_image_display_name(image_id=old_image_hash)})"
             )
 
-        try:
-            container.stop()
-            state.old_stopped = True
-        except DockerException as e:
-            LOG.warning(
-                "Failed to stop old container %s: %s (continuing anyway)",
-                state.original_name,
-                e,
-            )
-            # Continue even if stop fails - Docker may still be able to work with it
+        # Use configurable stop timeout with retry on timeout
+        stop_timeout = settings.stop_timeout_seconds
+        stop_success = False
+        for attempt in range(2):
+            try:
+                container.stop(timeout=stop_timeout)
+                state.old_stopped = True
+                stop_success = True
+                break
+            except (ReadTimeout, RequestException) as e:
+                if attempt == 0:
+                    # First timeout: retry with double the timeout
+                    LOG.warning(
+                        "Stop timeout for %s after %ds, retrying with %ds timeout: %s",
+                        state.original_name,
+                        stop_timeout,
+                        stop_timeout * 2,
+                        e,
+                    )
+                    stop_timeout *= 2
+                else:
+                    # Second timeout: force kill the container
+                    LOG.warning(
+                        "Stop timed out again for %s after %ds, forcing kill: %s",
+                        state.original_name,
+                        stop_timeout,
+                        e,
+                    )
+                    try:
+                        container.kill()
+                        state.old_stopped = True
+                        stop_success = True
+                    except DockerException as kill_err:
+                        LOG.warning(
+                            "Kill also failed for %s: %s (continuing anyway)",
+                            state.original_name,
+                            kill_err,
+                        )
+            except DockerException as e:
+                LOG.warning(
+                    "Failed to stop old container %s: %s (continuing anyway)",
+                    state.original_name,
+                    e,
+                )
+                break
+            except Exception as e:
+                if ReadTimeoutError is not None and isinstance(e, ReadTimeoutError):
+                    if attempt == 0:
+                        LOG.warning(
+                            "Stop timeout for %s after %ds, retrying with %ds timeout: %s",
+                            state.original_name,
+                            stop_timeout,
+                            stop_timeout * 2,
+                            e,
+                        )
+                        stop_timeout *= 2
+                    else:
+                        LOG.warning(
+                            "Stop timed out again for %s after %ds, forcing kill: %s",
+                            state.original_name,
+                            stop_timeout,
+                            e,
+                        )
+                        try:
+                            container.kill()
+                            state.old_stopped = True
+                            stop_success = True
+                        except DockerException as kill_err:
+                            LOG.warning(
+                                "Kill also failed for %s: %s (continuing anyway)",
+                                state.original_name,
+                                kill_err,
+                            )
+                else:
+                    raise
+        # Continue even if stop fails - Docker may still be able to work with it
 
         # Step 4: Attach to networks with MAC addresses
         # Containers are created with networking_config, but networks with MAC addresses
@@ -1815,17 +2124,26 @@ def run_once(
     _ensure_upgrade_state_loaded(settings.state_file)
     _ensure_known_containers_loaded(settings.state_file)
     current_time = timestamp or now_utc()
+    event_log: list[str] = []
 
-    # Check for stalled upgrades first
+    # Recover orphaned containers from crashed updates first
     try:
-        _recover_stalled_upgrades(client, settings, [], _should_notify(settings, "restart"))
+        _recover_orphaned_containers(
+            client, settings, event_log, _should_notify(settings, "update")
+        )
+    except Exception as error:
+        LOG.warning("Orphaned container recovery failed: %s", error)
+
+    # Check for stalled upgrades
+    try:
+        _recover_stalled_upgrades(client, settings, event_log, _should_notify(settings, "restart"))
     except Exception as error:
         LOG.warning("Upgrade recovery failed: %s", error)
 
     # Check for upgrades that may need manual intervention
     try:
         _check_for_manual_intervention(
-            client, settings, [], _should_notify(settings, "restart")
+            client, settings, event_log, _should_notify(settings, "restart")
         )
     except Exception as error:
         LOG.warning("Manual intervention check failed: %s", error)
@@ -1838,7 +2156,6 @@ def run_once(
     )
     monitored = _order_by_compose(monitored, settings)
     _track_new_containers(monitored)
-    event_log: list[str] = []
     hostname = gethostname()
     base_map = {_base_name(container): container for container in monitored}
     try:
