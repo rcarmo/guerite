@@ -25,6 +25,8 @@ class DummyContainer:
         networks: Optional[dict] = None,
         host_links: Optional[list[str]] = None,
         image_id: str = "old",
+        stop_raises: bool = False,
+        remove_raises: Optional[Exception] = None,
     ):
         self.name = name
         self.id = f"{name}-id"
@@ -45,14 +47,20 @@ class DummyContainer:
         self.stopped = False
         self.started = False
         self.removed = False
+        self.stop_raises = stop_raises
+        self.remove_raises = remove_raises
 
     def stop(self):
+        if self.stop_raises:
+            raise monitor.DockerException("stop failed")
         self.stopped = True
 
     def start(self):
         self.started = True
 
     def remove(self):
+        if self.remove_raises is not None:
+            raise self.remove_raises
         self.removed = True
 
 
@@ -63,6 +71,8 @@ class DummyAPI:
         self.raise_priority_type_error = False
         self.prune_images_result: Optional[dict] = None
         self.prune_images_error: Optional[Exception] = None
+        self.endpoint_kwargs: dict = {}
+        self.remove_failures_remaining: int = 0
 
     def rename(self, cid, name):
         self.calls.append(("rename", cid, name))
@@ -74,6 +84,7 @@ class DummyAPI:
     def create_endpoint_config(self, **kwargs):
         if self.raise_priority_type_error and "priority" in kwargs:
             raise TypeError("unexpected priority")
+        self.endpoint_kwargs = kwargs
         return {}
 
     def create_networking_config(self, *args, **kwargs):  # pragma: no cover
@@ -92,6 +103,9 @@ class DummyAPI:
 
     def remove_container(self, cid, force=False):
         self.calls.append(("remove", cid, force))
+        if self.remove_failures_remaining > 0:
+            self.remove_failures_remaining -= 1
+            raise monitor.DockerException("remove failed")
 
     def prune_images(self, **kwargs):
         if self.prune_images_error:
@@ -110,11 +124,37 @@ class DummyImages:
         self.calls.append(("remove", image))
 
 
+class FakeResponse:
+    def __init__(self, status: int = 200, reason: str = "OK"):
+        self.status = status
+        self.reason = reason
+
+
+class FakeConnection:
+    def __init__(self, status: int = 200, reason: str = "OK"):
+        self.calls: list = []
+        self.status = status
+        self.reason = reason
+
+    def request(self, method, path, body=None, headers=None):
+        self.calls.append((method, path, body, headers))
+
+    def getresponse(self):
+        return FakeResponse(self.status, self.reason)
+
+    def close(self):
+        self.calls.append("closed")
+
+
 class DummyClient:
     def __init__(self, containers_list: Optional[Iterable] = None):
         self.api = DummyAPI()
         self.images = DummyImages()
         self.containers = SimpleNamespace(list=lambda all=True: list(containers_list or []))
+        self.events_iter: Iterable = iter([])
+
+    def events(self, decode: bool = True):
+        yield from self.events_iter
 
 
 @pytest.fixture(autouse=True)
@@ -174,13 +214,19 @@ def settings() -> Settings:
 
 @pytest.fixture
 def notifier_settings(settings: Settings) -> Settings:
-    data = settings.__dict__ | {"pushover_token": "token", "pushover_user": "user", "webhook_url": "https://hook"}
+    data = settings.__dict__ | {
+        "pushover_token": "token",
+        "pushover_user": "user",
+        "pushover_api": "https://api.example/endpoint",
+        "webhook_url": "https://hook.example/hit",
+    }
     return Settings(**data)
 
 
 @pytest.fixture
-def restart_settings(settings: Settings) -> Settings:
-    return settings
+def restart_settings(tmp_path, settings: Settings) -> Settings:
+    data = settings.__dict__ | {"state_file": str(tmp_path / "state.json")}
+    return Settings(**data)
 
 
 @pytest.fixture
@@ -200,3 +246,10 @@ def dummy_client() -> Callable[..., DummyClient]:
 @pytest.fixture
 def fake_image():
     return DummyImage("new")
+
+
+@pytest.fixture
+def fake_connection() -> Callable[..., FakeConnection]:
+    def _make(status: int = 200, reason: str = "OK"):
+        return FakeConnection(status=status, reason=reason)
+    return _make

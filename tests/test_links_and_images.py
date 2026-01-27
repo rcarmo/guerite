@@ -1,5 +1,7 @@
 """Tests for recent bug fixes and enhancements."""
 
+import pytest
+
 from guerite import monitor
 from tests.conftest import DummyContainer, DummyImage
 
@@ -7,41 +9,19 @@ from tests.conftest import DummyContainer, DummyImage
 class TestNormalizeLinks:
     """Test _normalize_links_value function."""
 
-    def test_none_returns_none(self):
-        assert monitor._normalize_links_value(None) is None
-
-    def test_false_returns_none(self):
-        assert monitor._normalize_links_value(False) is None
-
-    def test_dict_returns_as_is(self):
-        links = {"container": "alias"}
-        assert monitor._normalize_links_value(links) == {"container": "alias"}
-
-    def test_list_of_strings_with_colon_converts_to_dict(self):
-        links = ["container:alias", "db:database"]
-        result = monitor._normalize_links_value(links)
-        assert result == {"container": "alias", "db": "database"}
-
-    def test_list_of_strings_without_colon_uses_name_as_alias(self):
-        links = ["container", "db"]
-        result = monitor._normalize_links_value(links)
-        assert result == {"container": "container", "db": "db"}
-
-    def test_mixed_list_with_and_without_colons(self):
-        links = ["container:alias", "db"]
-        result = monitor._normalize_links_value(links)
-        assert result == {"container": "alias", "db": "db"}
-
-    def test_empty_list_returns_none(self):
-        assert monitor._normalize_links_value([]) is None
-
-    def test_tuple_converts_like_list(self):
-        links = ("container:alias",)
-        result = monitor._normalize_links_value(links)
-        assert result == {"container": "alias"}
-
-    def test_unknown_type_returns_none(self):
-        assert monitor._normalize_links_value(123) is None
+    @pytest.mark.parametrize("input_value,expected", [
+        (None, None),
+        (False, None),
+        ([], None),
+        (123, None),  # unknown type
+        ({"container": "alias"}, {"container": "alias"}),
+        (["container:alias", "db:database"], {"container": "alias", "db": "database"}),
+        (["container", "db"], {"container": "container", "db": "db"}),
+        (["container:alias", "db"], {"container": "alias", "db": "db"}),
+        (("container:alias",), {"container": "alias"}),
+    ])
+    def test_normalize_links_value(self, input_value, expected):
+        assert monitor._normalize_links_value(input_value) == expected
 
 
 class TestImageDisplayName:
@@ -119,13 +99,13 @@ class TestGetImageReference:
 
     def test_handles_docker_exception(self, monkeypatch):
         container = DummyContainer("test")
-        
+
         def raise_error(*args, **kwargs):
             raise monitor.DockerException("boom")
-        
+
         monkeypatch.setattr(container, "image", property(lambda self: raise_error()))
         container.attrs["Config"]["Image"] = "fallback:tag"
-        
+
         result = monitor.get_image_reference(container)
         assert result == "fallback:tag"
 
@@ -161,7 +141,7 @@ class TestGueriteCreatedTracking:
         container2 = DummyContainer("app2")
         monitor._GUERITE_CREATED.add(container2.id)
         monitor._track_new_containers([container1, container2])
-        
+
         # Should not be in pending detects
         assert len(monitor._PENDING_DETECTS) == 0
         assert container2.id not in monitor._GUERITE_CREATED  # Cleaned up
@@ -181,7 +161,7 @@ class TestGueriteCreatedTracking:
         # External container appears (not created by Guerite)
         container2 = DummyContainer("app2")
         monitor._track_new_containers([container1, container2])
-        
+
         # Should be detected
         assert len(monitor._PENDING_DETECTS) == 1
         assert monitor._PENDING_DETECTS[0] == "app2"
@@ -206,7 +186,7 @@ class TestGueriteCreatedTracking:
         container1_restarted = DummyContainer("app1")
         container1_restarted.id = "app1-id-new"
         monitor._track_new_containers([container1_restarted])
-        
+
         # Should NOT be detected as new
         assert len(monitor._PENDING_DETECTS) == 0
         assert "app1" in monitor._KNOWN_CONTAINER_NAMES

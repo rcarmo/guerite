@@ -3,52 +3,21 @@ from datetime import datetime, timezone
 
 import guerite.__main__ as main_mod
 from guerite.config import Settings
+from tests.conftest import DummyClient
 
 
-class DummyClient:
-    def __init__(self):
-        self.events_iter = iter([])
-
-    def events(self, decode=True):
-        yield from self.events_iter
-
-
-@pytest.fixture
-def settings() -> Settings:
-    return Settings(
-        docker_host="unix://test",
-        update_label="guerite.update",
-        restart_label="guerite.restart",
-        recreate_label="guerite.recreate",
-        health_label="guerite.health_check",
-        health_backoff_seconds=30,
-        health_check_timeout_seconds=60,
-        prune_timeout_seconds=None,
-        notifications={"startup"},
-        timezone="UTC",
-        pushover_token=None,
-        pushover_user=None,
-        pushover_api="https://example",
-        webhook_url=None,
-        dry_run=False,
-        log_level="INFO",
-        state_file="/tmp/state",
-        prune_cron=None,
-        rollback_grace_seconds=3600,
-        restart_retry_limit=3,
-        depends_label="guerite.depends_on",
-        action_cooldown_seconds=60,
-    )
-
-
-def test_is_monitored_event_actions(settings: Settings):
+@pytest.mark.parametrize("action,expected", [
+    ("start", True),
+    ("restart", True),
+    ("update", True),
+    ("stop", True),
+    ("die", True),
+    ("exec", False),
+])
+def test_is_monitored_event_actions(settings: Settings, action: str, expected: bool):
     attrs = {settings.update_label: "*"}
-    base_event = {"Type": "container", "Actor": {"Attributes": attrs}}
-    for action in ["start", "restart", "update", "stop", "die"]:
-        event = dict(base_event, Action=action)
-        assert main_mod.is_monitored_event(event, settings) is True
-    event = dict(base_event, Action="exec")
-    assert main_mod.is_monitored_event(event, settings) is False
+    event = {"Type": "container", "Action": action, "Actor": {"Attributes": attrs}}
+    assert main_mod.is_monitored_event(event, settings) is expected
 
 
 def test_build_client_failure(monkeypatch, settings: Settings):
@@ -68,33 +37,10 @@ def test_build_client_with_retry_success(monkeypatch, settings: Settings):
     assert isinstance(client, FakeClient)
 
 
-def test_build_client_with_retry_eventual_success(monkeypatch):
+def test_build_client_with_retry_eventual_success(monkeypatch, settings: Settings):
     """Test successful connection after retries."""
-    settings = Settings(
-        docker_host="unix://test",
-        update_label="guerite.update",
-        restart_label="guerite.restart",
-        recreate_label="guerite.recreate",
-        health_label="guerite.health_check",
-        health_backoff_seconds=30,
-        health_check_timeout_seconds=60,
-        prune_timeout_seconds=None,
-        notifications={"startup"},
-        timezone="UTC",
-        pushover_token=None,
-        pushover_user=None,
-        pushover_api="https://example",
-        webhook_url=None,
-        dry_run=False,
-        log_level="INFO",
-        state_file="/tmp/state",
-        prune_cron=None,
-        rollback_grace_seconds=3600,
-        restart_retry_limit=3,
-        depends_label="guerite.depends_on",
-        action_cooldown_seconds=60,
-        docker_connect_retries=2,
-        docker_connect_backoff_seconds=1,
+    retry_settings = Settings(
+        **{**settings.__dict__, "docker_connect_retries": 2, "docker_connect_backoff_seconds": 1}
     )
 
     attempt = {"count": 0}
@@ -110,38 +56,15 @@ def test_build_client_with_retry_eventual_success(monkeypatch):
 
     monkeypatch.setattr(main_mod, "DockerClient", fake_connect)
     monkeypatch.setattr(main_mod, "sleep", lambda x: None)
-    client = main_mod.build_client_with_retry(settings)
+    client = main_mod.build_client_with_retry(retry_settings)
     assert isinstance(client, FakeClient)
     assert attempt["count"] == 2
 
 
-def test_build_client_with_retry_exhausted(monkeypatch):
+def test_build_client_with_retry_exhausted(monkeypatch, settings: Settings):
     """Test failure after all retries exhausted."""
-    settings = Settings(
-        docker_host="unix://test",
-        update_label="guerite.update",
-        restart_label="guerite.restart",
-        recreate_label="guerite.recreate",
-        health_label="guerite.health_check",
-        health_backoff_seconds=30,
-        health_check_timeout_seconds=60,
-        prune_timeout_seconds=None,
-        notifications={"startup"},
-        timezone="UTC",
-        pushover_token=None,
-        pushover_user=None,
-        pushover_api="https://example",
-        webhook_url=None,
-        dry_run=False,
-        log_level="INFO",
-        state_file="/tmp/state",
-        prune_cron=None,
-        rollback_grace_seconds=3600,
-        restart_retry_limit=3,
-        depends_label="guerite.depends_on",
-        action_cooldown_seconds=60,
-        docker_connect_retries=2,
-        docker_connect_backoff_seconds=1,
+    retry_settings = Settings(
+        **{**settings.__dict__, "docker_connect_retries": 2, "docker_connect_backoff_seconds": 1}
     )
 
     def fake_connect(**kwargs):
@@ -150,54 +73,40 @@ def test_build_client_with_retry_exhausted(monkeypatch):
     monkeypatch.setattr(main_mod, "DockerClient", fake_connect)
     monkeypatch.setattr(main_mod, "sleep", lambda x: None)
     with pytest.raises(SystemExit) as exc_info:
-        main_mod.build_client_with_retry(settings)
+        main_mod.build_client_with_retry(retry_settings)
     assert "3 attempts" in str(exc_info.value)
 
 
-def test_format_human_local_today():
-    """Test _format_human_local for today."""
+@pytest.mark.parametrize("dt,expected", [
+    (datetime(2025, 6, 15, 16, 45, tzinfo=timezone.utc), "today 16:45"),
+    (datetime(2025, 6, 16, 8, 0, tzinfo=timezone.utc), "tomorrow 08:00"),
+    (datetime(2025, 6, 20, 10, 15, tzinfo=timezone.utc), "2025-06-20 10:15"),
+])
+def test_format_human_local(dt: datetime, expected: str):
+    """Test _format_human_local for various dates."""
     now = datetime(2025, 6, 15, 14, 30, tzinfo=timezone.utc)
-    dt = datetime(2025, 6, 15, 16, 45, tzinfo=timezone.utc)
     result = main_mod._format_human_local(dt, now)
-    assert result == "today 16:45"
+    assert result == expected
 
 
-def test_format_human_local_tomorrow():
-    """Test _format_human_local for tomorrow."""
-    now = datetime(2025, 6, 15, 14, 30, tzinfo=timezone.utc)
-    dt = datetime(2025, 6, 16, 8, 0, tzinfo=timezone.utc)
-    result = main_mod._format_human_local(dt, now)
-    assert result == "tomorrow 08:00"
+@pytest.mark.parametrize("label,expected", [
+    (None, "unspecified"),
+    ("guerite.update", "update"),
+    ("guerite.restart", "restart"),
+    ("custom.label", "custom.label"),
+])
+def test_short_label(label, expected):
+    """Test _short_label with various inputs."""
+    assert main_mod._short_label(label) == expected
 
 
-def test_format_human_local_other_date():
-    """Test _format_human_local for other dates."""
-    now = datetime(2025, 6, 15, 14, 30, tzinfo=timezone.utc)
-    dt = datetime(2025, 6, 20, 10, 15, tzinfo=timezone.utc)
-    result = main_mod._format_human_local(dt, now)
-    assert result == "2025-06-20 10:15"
-
-
-def test_short_label_none():
-    """Test _short_label with None."""
-    assert main_mod._short_label(None) == "unspecified"
-
-
-def test_short_label_guerite_prefix():
-    """Test _short_label strips guerite. prefix."""
-    assert main_mod._short_label("guerite.update") == "update"
-    assert main_mod._short_label("guerite.restart") == "restart"
-
-
-def test_short_label_other():
-    """Test _short_label with other labels."""
-    assert main_mod._short_label("custom.label") == "custom.label"
-
-
-def test_format_reason():
+@pytest.mark.parametrize("name,label,expected", [
+    ("myapp", "guerite.update", "myapp (update)"),
+    (None, None, "unspecified (unspecified)"),
+])
+def test_format_reason(name, label, expected):
     """Test _format_reason formatting."""
-    assert main_mod._format_reason("myapp", "guerite.update") == "myapp (update)"
-    assert main_mod._format_reason(None, None) == "unspecified (unspecified)"
+    assert main_mod._format_reason(name, label) == expected
 
 
 def test_main_loop_runs_single_iteration(monkeypatch, settings: Settings):
