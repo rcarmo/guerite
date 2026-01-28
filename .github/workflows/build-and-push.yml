@@ -99,11 +99,6 @@ jobs:
     name: Create multi-arch manifest
     runs-on: ubuntu-latest
     needs: [build-amd64, build-arm64]
-  # Merge digests into a single multi-arch manifest
-  merge:
-    name: Create multi-arch manifest
-    runs-on: ubuntu-latest
-    needs: [build-amd64, build-arm64]
 
     steps:
       - name: Set up Docker Buildx
