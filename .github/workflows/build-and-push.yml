@@ -144,7 +144,7 @@ jobs:
       - name: Prune releases and tags
         uses: actions/github-script@v7
         with:
-          github-token: ${{ secrets.RELEASES_TOKEN || secrets.GITHUB_TOKEN }}
+          github-token: ${{ secrets.RELEASES_TOKEN || vars.RELEASES_TOKEN || secrets.GITHUB_TOKEN }}
           script: |
             const keep = 5;
             const { owner, repo } = context.repo;
@@ -262,3 +262,19 @@ jobs:
             }
             
             core.info('Cleanup completed');
+
+  cleanup-ghcr:
+    name: Cleanup old GHCR images
+    runs-on: ubuntu-latest
+    needs: merge
+    permissions:
+      packages: write
+    steps:
+      - name: Cleanup old GHCR package versions
+        uses: actions/delete-package-versions@v5
+        with:
+          owner: ${{ github.repository_owner }}
+          package-name: ${{ env.IMAGE_NAME }}
+          package-type: container
+          min-versions-to-keep: 5
+          token: ${{ secrets.RELEASES_TOKEN || secrets.GITHUB_TOKEN }}
