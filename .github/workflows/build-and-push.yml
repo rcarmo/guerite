@@ -195,6 +195,7 @@ jobs:
       - name: Cleanup old workflow runs and tags
         uses: actions/github-script@v7
         with:
+          github-token: ${{ secrets.RELEASES_TOKEN || vars.RELEASES_TOKEN || secrets.GITHUB_TOKEN }}
           script: |
             const keepCount = 5;
             const { owner, repo } = context.repo;
@@ -261,6 +262,35 @@ jobs:
               }
             }
             
+            // Cleanup old artifacts
+            core.info('Fetching artifacts...');
+            const artifacts = await github.paginate(
+              github.rest.actions.listArtifactsForRepo,
+              {
+                owner,
+                repo,
+                per_page: 100,
+              }
+            );
+            const sortedArtifacts = artifacts
+              .filter(artifact => !artifact.expired)
+              .sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+            const artifactsToDelete = sortedArtifacts.slice(keepCount);
+
+            core.info(`Found ${artifacts.length} artifacts, keeping ${keepCount} newest, deleting ${artifactsToDelete.length} older...`);
+            for (const artifact of artifactsToDelete) {
+              core.info(`Deleting artifact ${artifact.name} (id ${artifact.id})`);
+              try {
+                await github.rest.actions.deleteArtifact({
+                  owner,
+                  repo,
+                  artifact_id: artifact.id,
+                });
+              } catch (error) {
+                core.warning(`Failed to delete artifact ${artifact.id}: ${error.message}`);
+              }
+            }
+
             core.info('Cleanup completed');
 
   cleanup-ghcr:
@@ -277,4 +307,4 @@ jobs:
           package-name: ${{ env.IMAGE_NAME }}
           package-type: container
           min-versions-to-keep: 5
-          token: ${{ secrets.RELEASES_TOKEN || secrets.GITHUB_TOKEN }}
+          token: ${{ secrets.RELEASES_TOKEN || vars.RELEASES_TOKEN || secrets.GITHUB_TOKEN }}
