@@ -33,7 +33,7 @@ def test_event_listener_sets_wake_signal(monkeypatch, settings: Settings):
     # Avoid sleeping if loop hits the exception handler
     monkeypatch.setattr(main_mod, "sleep", lambda *_args, **_kwargs: None, raising=False)
 
-    start_event_listener(client, settings, wake)
+    start_event_listener(settings, wake, client)
     assert wake.wait(timeout=1.0) is True
 
 
@@ -49,5 +49,5 @@ def test_event_listener_respects_cooldown(monkeypatch, settings: Settings):
     monkeypatch.setattr(main_mod, "now_tz", lambda tz: now)
     monkeypatch.setattr(main_mod, "sleep", lambda *_args, **_kwargs: None, raising=False)
 
-    start_event_listener(client, settings, wake)
+    start_event_listener(settings, wake, client)
     assert wake.wait(timeout=0.5) is False

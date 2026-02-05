@@ -1,3 +1,4 @@
+from asyncio import run_coroutine_threadsafe
 from re import compile as re_compile
 from datetime import datetime
 from datetime import timedelta
@@ -137,9 +138,16 @@ class HttpServer:
     def stop(self) -> None:
         """Gracefully stop the HTTP server."""
         if self._loop is not None and self._loop.is_running():
+            if self._runner is not None:
+                try:
+                    run_coroutine_threadsafe(self._runner.cleanup(), self._loop).result(timeout=5.0)
+                except Exception as error:
+                    LOG.debug("Error during HTTP server cleanup: %s", error)
             self._loop.call_soon_threadsafe(self._loop.stop)
         if self._thread.is_alive():
             self._thread.join(timeout=5.0)
+            if self._thread.is_alive():
+                LOG.warning("HTTP server thread did not stop within timeout")
 
 
 def _atomic_write_json(path: str, data: Any) -> None:
@@ -755,27 +763,33 @@ def _prune_due(settings: Settings, timestamp: datetime) -> bool:
     cron_expression = _clean_cron_expression(settings.prune_cron)
     if not cron_expression:
         return False
-    if _PRUNE_CRON_INVALID:
-        return False
+    with _STATE_LOCK:
+        if _PRUNE_CRON_INVALID:
+            return False
     try:
         return croniter.match(cron_expression, timestamp)
     except (ValueError, KeyError) as error:
         LOG.warning("Invalid prune cron expression %s: %s", cron_expression, error)
-        _PRUNE_CRON_INVALID = True
+        with _STATE_LOCK:
+            _PRUNE_CRON_INVALID = True
         return False
 
 
 def next_prune_time(settings: Settings, reference: datetime) -> Optional[datetime]:
     global _PRUNE_CRON_INVALID
     cron_expression = _clean_cron_expression(settings.prune_cron)
-    if not cron_expression or _PRUNE_CRON_INVALID:
+    if not cron_expression:
         return None
+    with _STATE_LOCK:
+        if _PRUNE_CRON_INVALID:
+            return None
     try:
         iterator = croniter(cron_expression, reference, ret_type=datetime)
         return iterator.get_next(datetime)
     except (ValueError, KeyError) as error:
         LOG.warning("Invalid prune cron expression %s: %s", cron_expression, error)
-        _PRUNE_CRON_INVALID = True
+        with _STATE_LOCK:
+            _PRUNE_CRON_INVALID = True
         return None
 
 
@@ -2037,23 +2051,25 @@ def prune_images(
 def _flush_detect_notifications(
     settings: Settings, hostname: str, current_time: datetime
 ) -> None:
-    global _PENDING_DETECTS, _LAST_DETECT_NOTIFY
-    if not _PENDING_DETECTS:
-        return
-    if not _should_notify(settings, "detect"):
-        return
-    if (
-        _LAST_DETECT_NOTIFY is not None
-        and (current_time - _LAST_DETECT_NOTIFY).total_seconds() < 60
-    ):
-        return
-    unique = sorted({name or "unknown" for name in _PENDING_DETECTS})
+    global _LAST_DETECT_NOTIFY
+    with _STATE_LOCK:
+        if not _PENDING_DETECTS:
+            return
+        if not _should_notify(settings, "detect"):
+            return
+        if (
+            _LAST_DETECT_NOTIFY is not None
+            and (current_time - _LAST_DETECT_NOTIFY).total_seconds() < 60
+        ):
+            return
+        unique = sorted({name or "unknown" for name in _PENDING_DETECTS})
+        _PENDING_DETECTS.clear()
+        _LAST_DETECT_NOTIFY = current_time
+    # Notify outside lock to avoid holding it during I/O
     message = "New monitored containers: " + ", ".join(unique)
     notify_pushover(settings, f"Guerite on {hostname}", message)
     notify_webhook(settings, f"Guerite on {hostname}", message)
     LOG.info(message)
-    _PENDING_DETECTS = []
-    _LAST_DETECT_NOTIFY = current_time
 
 
 def run_once(

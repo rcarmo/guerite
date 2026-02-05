@@ -105,14 +105,24 @@ def is_monitored_event(event: dict, settings: Settings) -> bool:
     return False
 
 
-def start_event_listener(client: DockerClient, settings: Settings, wake_signal: Event) -> None:
+def start_event_listener(
+    settings: Settings, wake_signal: Event, client: Optional[DockerClient] = None
+) -> None:
+    """Start a daemon thread that listens for Docker events.
+    
+    Uses a separate DockerClient instance for thread safety unless one is provided.
+    """
     def _run() -> None:
         backoff_seconds = 5
         max_backoff = 60
+        # Use provided client (for testing) or create a dedicated one
+        event_client: Optional[DockerClient] = client
         while True:
             try:
+                if event_client is None:
+                    event_client = DockerClient(base_url=settings.docker_host)
                 backoff_seconds = 5  # Reset on successful connection
-                for event in client.events(decode=True):
+                for event in event_client.events(decode=True):
                     if not isinstance(event, dict):
                         continue
                     if not is_monitored_event(event, settings):
@@ -134,6 +144,8 @@ def start_event_listener(client: DockerClient, settings: Settings, wake_signal: 
                     wake_signal.set()
             except DockerException as error:
                 LOG.warning("Event stream error: %s; retrying in %ss", error, backoff_seconds)
+                if client is None:
+                    event_client = None  # Force reconnection on next iteration (only if we created it)
                 sleep(backoff_seconds)
                 backoff_seconds = min(backoff_seconds * 2, max_backoff)
 
@@ -154,7 +166,7 @@ def main() -> None:
             http_trigger = Event()
             http_server = HttpServer(settings, wake_signal, http_trigger)
             http_server.start()
-        start_event_listener(client, settings, wake_signal)
+        start_event_listener(settings, wake_signal)
         logged_schedule = False
         hostname = gethostname()
         current_reason_name: Optional[str] = None
