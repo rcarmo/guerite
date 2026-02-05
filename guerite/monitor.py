@@ -7,8 +7,10 @@ from json import dump
 from json import load
 from logging import getLogger
 from inspect import signature
+from os import replace as os_replace
 from os.path import exists
 from socket import gethostname
+from tempfile import NamedTemporaryFile
 from threading import Event, Lock, Thread
 from typing import Any, Optional
 from time import sleep
@@ -35,6 +37,9 @@ from .notifier import notify_webhook
 from .utils import now_utc
 
 LOG = getLogger(__name__)
+
+# Global state with thread-safe access via _STATE_LOCK
+_STATE_LOCK = Lock()
 _HEALTH_BACKOFF: dict[str, datetime] = {}
 _HEALTH_BACKOFF_LOADED = False
 _NO_HEALTH_WARNED: set[str] = set()
@@ -127,6 +132,32 @@ class HttpServer:
             return web.Response(status=401, text="unauthorized")
         metrics = _format_metrics(metrics_snapshot())
         return web.Response(status=200, text=metrics, content_type="text/plain")
+
+    def stop(self) -> None:
+        """Gracefully stop the HTTP server."""
+        if self._loop is not None and self._loop.is_running():
+            self._loop.call_soon_threadsafe(self._loop.stop)
+        if self._thread.is_alive():
+            self._thread.join(timeout=5.0)
+
+
+def _atomic_write_json(path: str, data: Any) -> None:
+    """Write JSON to a file atomically using a temp file and rename."""
+    from os.path import dirname
+    dir_path = dirname(path) or "."
+    try:
+        with NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=dir_path,
+            suffix=".tmp",
+            delete=False,
+        ) as tmp:
+            dump(data, tmp)
+            tmp_path = tmp.name
+        os_replace(tmp_path, path)
+    except OSError as error:
+        LOG.debug("Failed to atomically write %s: %s", path, error)
 
 
 @dataclass
@@ -258,11 +289,7 @@ def _save_health_backoff(state_file: str) -> None:
         container_id: value.isoformat()
         for container_id, value in _HEALTH_BACKOFF.items()
     }
-    try:
-        with open(state_file, "w", encoding="utf-8") as handle:
-            dump(serializable, handle)
-    except OSError as error:
-        LOG.debug("Failed to persist health backoff state to %s: %s", state_file, error)
+    _atomic_write_json(state_file, serializable)
 
 
 def _ensure_known_containers_loaded(state_file: str) -> None:
@@ -300,15 +327,12 @@ def _save_known_containers(state_file: str) -> None:
     if not isinstance(state_file, str):
         return
     known_state_file = state_file.replace(".json", "_known.json")
-    serializable = {
-        "container_ids": list(_KNOWN_CONTAINERS),
-        "container_names": list(_KNOWN_CONTAINER_NAMES),
-    }
-    try:
-        with open(known_state_file, "w", encoding="utf-8") as handle:
-            dump(serializable, handle)
-    except OSError as error:
-        LOG.debug("Failed to save known containers state: %s", error)
+    with _STATE_LOCK:
+        serializable = {
+            "container_ids": list(_KNOWN_CONTAINERS),
+            "container_names": list(_KNOWN_CONTAINER_NAMES),
+        }
+    _atomic_write_json(known_state_file, serializable)
 
 
 def select_monitored_containers(
@@ -748,28 +772,29 @@ def next_prune_time(settings: Settings, reference: datetime) -> Optional[datetim
 
 
 def _track_new_containers(containers: list[Container]) -> None:
-    global _KNOWN_INITIALIZED, _GUERITE_CREATED
-    if not _KNOWN_INITIALIZED:
-        for container in containers:
-            _KNOWN_CONTAINERS.add(container.id)
-            _KNOWN_CONTAINER_NAMES.add(container.name)
-        _KNOWN_INITIALIZED = True
-        return
-    for container in containers:
-        if container.id not in _KNOWN_CONTAINERS:
-            _KNOWN_CONTAINERS.add(container.id)
-            # Only notify if it's a truly new container name (not just a restart)
-            if container.name not in _KNOWN_CONTAINER_NAMES:
+    global _KNOWN_INITIALIZED
+    with _STATE_LOCK:
+        if not _KNOWN_INITIALIZED:
+            for container in containers:
+                _KNOWN_CONTAINERS.add(container.id)
                 _KNOWN_CONTAINER_NAMES.add(container.name)
-                # Don't notify about containers we created
-                if container.id not in _GUERITE_CREATED:
-                    _PENDING_DETECTS.append(container.name)
+            _KNOWN_INITIALIZED = True
+            return
+        for container in containers:
+            if container.id not in _KNOWN_CONTAINERS:
+                _KNOWN_CONTAINERS.add(container.id)
+                # Only notify if it's a truly new container name (not just a restart)
+                if container.name not in _KNOWN_CONTAINER_NAMES:
+                    _KNOWN_CONTAINER_NAMES.add(container.name)
+                    # Don't notify about containers we created
+                    if container.id not in _GUERITE_CREATED:
+                        _PENDING_DETECTS.append(container.name)
+                    else:
+                        _GUERITE_CREATED.discard(container.id)
                 else:
-                    _GUERITE_CREATED.discard(container.id)
-            else:
-                # Existing container restarted externally - just update tracking
-                if container.id in _GUERITE_CREATED:
-                    _GUERITE_CREATED.discard(container.id)
+                    # Existing container restarted externally - just update tracking
+                    if container.id in _GUERITE_CREATED:
+                        _GUERITE_CREATED.discard(container.id)
 
 
 def _short_id(identifier: Optional[str]) -> str:
@@ -901,10 +926,11 @@ def _run_lifecycle_hook(
 
 
 def _action_allowed(base_name: str, now: datetime, settings: Settings) -> bool:
-    if base_name in _IN_FLIGHT:
-        LOG.debug("Skipping %s; action in-flight", base_name)
-        return False
-    last = _LAST_ACTION.get(base_name)
+    with _STATE_LOCK:
+        if base_name in _IN_FLIGHT:
+            LOG.debug("Skipping %s; action in-flight", base_name)
+            return False
+        last = _LAST_ACTION.get(base_name)
     if last is None:
         return True
     if (now - last).total_seconds() >= settings.action_cooldown_seconds:
@@ -915,8 +941,14 @@ def _action_allowed(base_name: str, now: datetime, settings: Settings) -> bool:
 
 
 def _mark_action(base_name: str, when: datetime) -> None:
-    _LAST_ACTION[base_name] = when
-    _IN_FLIGHT.add(base_name)
+    with _STATE_LOCK:
+        _LAST_ACTION[base_name] = when
+        _IN_FLIGHT.add(base_name)
+
+
+def _clear_in_flight(base_name: str) -> None:
+    with _STATE_LOCK:
+        _IN_FLIGHT.discard(base_name)
 
 
 def _strip_guerite_suffix(name: str) -> str:
@@ -1134,12 +1166,8 @@ def _save_upgrade_state(state_file: str) -> None:
 
         serializable[container_id] = state_dict
 
-    try:
-        with open(upgrade_state_file, "w", encoding="utf-8") as handle:
-            dump(serializable, handle)
-        LOG.debug("Saved upgrade state for %d containers", len(_UPGRADE_STATE))
-    except OSError as error:
-        LOG.debug("Failed to save upgrade state: %s", error)
+    _atomic_write_json(upgrade_state_file, serializable)
+    LOG.debug("Saved upgrade state for %d containers", len(_UPGRADE_STATE))
 
 
 def _clear_upgrade_labels(client: DockerClient, container_id: str) -> bool:
@@ -1774,7 +1802,8 @@ def restart_container(
         # Step 7: Now that it's running and healthy, give it the production name
         client.api.rename(state.new_id, state.original_name)
         state.new_renamed_to_production = True
-        _GUERITE_CREATED.add(state.new_id)
+        with _STATE_LOCK:
+            _GUERITE_CREATED.add(state.new_id)
 
         LOG.info("Started new container %s", state.original_name)
         if notify:
@@ -2421,7 +2450,8 @@ def run_once(
         notify_pushover(settings, title, body)
         notify_webhook(settings, title, body)
     _flush_detect_notifications(settings, hostname, current_time)
-    _IN_FLIGHT.clear()
+    with _STATE_LOCK:
+        _IN_FLIGHT.clear()
 
     # Save state at the end of each run for crash recovery
     _save_upgrade_state(settings.state_file)

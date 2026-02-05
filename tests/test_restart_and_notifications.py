@@ -175,7 +175,7 @@ def test_save_health_backoff_errors_are_handled(tmp_path, caplog):
     bad_path = tmp_path / "dir" / "state.json"
     # directory does not exist; should log and not raise
     monitor._save_health_backoff(str(bad_path))
-    assert any("Failed to persist health backoff" in msg for msg in caplog.messages)
+    assert any("Failed to atomically write" in msg for msg in caplog.messages)
 
 
 def test_remove_old_image_warns_on_failure(caplog):
