@@ -149,73 +149,77 @@ def main() -> None:
     wake_signal = Event()
     http_trigger: Optional[Event] = None
     http_server: Optional[HttpServer] = None
-    if settings.http_api_enabled:
-        http_trigger = Event()
-        http_server = HttpServer(settings, wake_signal, http_trigger)
-        http_server.start()
-    start_event_listener(client, settings, wake_signal)
-    logged_schedule = False
-    hostname = gethostname()
-    current_reason_name: Optional[str] = None
-    current_reason_label: Optional[str] = None
-    current_reason_source: Optional[str] = "startup"
-    while True:
-        timestamp = now_tz(settings.timezone)
-        containers = select_monitored_containers(client, settings)
-        if current_reason_source is not None:
-            if current_reason_source == "docker_event":
-                LOG.info("Running checks due to docker event")
-            elif current_reason_name is not None or current_reason_label is not None:
-                LOG.info(
-                    "Running checks for %s",
-                    _format_reason(current_reason_name, current_reason_label),
-                )
+    try:
+        if settings.http_api_enabled:
+            http_trigger = Event()
+            http_server = HttpServer(settings, wake_signal, http_trigger)
+            http_server.start()
+        start_event_listener(client, settings, wake_signal)
+        logged_schedule = False
+        hostname = gethostname()
+        current_reason_name: Optional[str] = None
+        current_reason_label: Optional[str] = None
+        current_reason_source: Optional[str] = "startup"
+        while True:
+            timestamp = now_tz(settings.timezone)
+            containers = select_monitored_containers(client, settings)
+            if current_reason_source is not None:
+                if current_reason_source == "docker_event":
+                    LOG.info("Running checks due to docker event")
+                elif current_reason_name is not None or current_reason_label is not None:
+                    LOG.info(
+                        "Running checks for %s",
+                        _format_reason(current_reason_name, current_reason_label),
+                    )
+                else:
+                    LOG.info("Running checks (unspecified trigger)")
+                current_reason_source = None
+            if not logged_schedule:
+                summary = schedule_summary(containers, settings, reference=timestamp)
+                prune_next = next_prune_time(settings, reference=timestamp)
+                if prune_next is not None:
+                    summary.append(_format_human_local(prune_next, timestamp) + " (prune)")
+                if summary:
+                    LOG.info("Upcoming checks: %s", "; ".join(summary))
+                    if "startup" in settings.notifications:
+                        notify_pushover(settings, f"Guerite on {hostname}", "Starting Guerite, checks scheduled for:\n" + "\n".join(summary))
+                else:
+                    LOG.info("No upcoming checks found")
+                logged_schedule = True
+            run_once(client, settings, timestamp=timestamp, containers=containers)
+            if settings.run_once:
+                LOG.info("Run-once enabled; exiting after single cycle")
+                return
+            next_run_at, next_name, next_label = next_wakeup(containers, settings, reference=timestamp)
+            delta_seconds = (next_run_at - now_tz(settings.timezone)).total_seconds()
+            sleep_seconds = max(1, int(ceil(delta_seconds)))
+            LOG.info(
+                "Next check at %s (in %ss) for %s",
+                next_run_at.isoformat(),
+                sleep_seconds,
+                _format_reason(next_name, next_label),
+            )
+            woke = wake_signal.wait(timeout=sleep_seconds)
+            if not woke and http_trigger is not None and http_trigger.is_set():
+                woke = True
+            if woke:
+                wake_signal.clear()
+                if http_trigger is not None and http_trigger.is_set():
+                    LOG.debug("Woken early by HTTP API")
+                    http_trigger.clear()
+                    current_reason_source = "http_api"
+                else:
+                    LOG.debug("Woken early by Docker event")
+                    current_reason_source = "docker_event"
+                current_reason_name = None
+                current_reason_label = None
             else:
-                LOG.info("Running checks (unspecified trigger)")
-            current_reason_source = None
-        if not logged_schedule:
-            summary = schedule_summary(containers, settings, reference=timestamp)
-            prune_next = next_prune_time(settings, reference=timestamp)
-            if prune_next is not None:
-                summary.append(_format_human_local(prune_next, timestamp) + " (prune)")
-            if summary:
-                LOG.info("Upcoming checks: %s", "; ".join(summary))
-                if "startup" in settings.notifications:
-                    notify_pushover(settings, f"Guerite on {hostname}", "Starting Guerite, checks scheduled for:\n" + "\n".join(summary))
-            else:
-                LOG.info("No upcoming checks found")
-            logged_schedule = True
-        run_once(client, settings, timestamp=timestamp, containers=containers)
-        if settings.run_once:
-            LOG.info("Run-once enabled; exiting after single cycle")
-            return
-        next_run_at, next_name, next_label = next_wakeup(containers, settings, reference=timestamp)
-        delta_seconds = (next_run_at - now_tz(settings.timezone)).total_seconds()
-        sleep_seconds = max(1, int(ceil(delta_seconds)))
-        LOG.info(
-            "Next check at %s (in %ss) for %s",
-            next_run_at.isoformat(),
-            sleep_seconds,
-            _format_reason(next_name, next_label),
-        )
-        woke = wake_signal.wait(timeout=sleep_seconds)
-        if not woke and http_trigger is not None and http_trigger.is_set():
-            woke = True
-        if woke:
-            wake_signal.clear()
-            if http_trigger is not None and http_trigger.is_set():
-                LOG.debug("Woken early by HTTP API")
-                http_trigger.clear()
-                current_reason_source = "http_api"
-            else:
-                LOG.debug("Woken early by Docker event")
-                current_reason_source = "docker_event"
-            current_reason_name = None
-            current_reason_label = None
-        else:
-            current_reason_name = next_name
-            current_reason_label = next_label
-            current_reason_source = "schedule"
+                current_reason_name = next_name
+                current_reason_label = next_label
+                current_reason_source = "schedule"
+    finally:
+        if http_server is not None:
+            http_server.stop()
 
 
 if __name__ == "__main__":

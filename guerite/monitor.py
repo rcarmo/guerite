@@ -541,7 +541,8 @@ def _preflight_mounts(
 def _health_allowed(
     container_id: str, base_name: str, now: datetime, settings: Settings
 ) -> bool:
-    next_time = _HEALTH_BACKOFF.get(container_id)
+    with _STATE_LOCK:
+        next_time = _HEALTH_BACKOFF.get(container_id)
     if next_time is None:
         return True
     if now >= next_time:
@@ -559,7 +560,8 @@ def _health_allowed(
 def _restart_allowed(
     container_id: str, base_name: str, now: datetime, settings: Settings
 ) -> bool:
-    next_time = _RESTART_BACKOFF.get(container_id)
+    with _STATE_LOCK:
+        next_time = _RESTART_BACKOFF.get(container_id)
     if next_time is None:
         return True
     if now >= next_time:
@@ -643,8 +645,9 @@ def _register_restart_failure(
     settings: Settings,
     error: Exception,
 ) -> None:
-    fail_count = _RESTART_FAIL_COUNT.get(container_id, 0) + 1
-    _RESTART_FAIL_COUNT[container_id] = fail_count
+    with _STATE_LOCK:
+        fail_count = _RESTART_FAIL_COUNT.get(container_id, 0) + 1
+        _RESTART_FAIL_COUNT[container_id] = fail_count
     backoff_seconds = min(settings.health_backoff_seconds * max(1, fail_count), 3600)
     if fail_count >= settings.restart_retry_limit:
         backoff_seconds = max(
@@ -657,7 +660,8 @@ def _register_restart_failure(
             fail_count,
         )
     backoff_until = now_utc() + timedelta(seconds=backoff_seconds)
-    _RESTART_BACKOFF[container_id] = backoff_until
+    with _STATE_LOCK:
+        _RESTART_BACKOFF[container_id] = backoff_until
     if notify:
         event_log.append(f"Failed to restart {original_name}: {error}")
         _notify_restart_backoff(
@@ -1363,10 +1367,11 @@ def _reconcile_failed_upgrades(
         _clear_tracked_upgrade_state(container_id)
         _UPGRADE_STATE_NOTIFIED.discard(container_id)
         # Clear backoff for both original tracked ID and current container ID
-        for cid in {container_id, container.id}:
-            if cid:
-                _RESTART_BACKOFF.pop(cid, None)
-                _RESTART_FAIL_COUNT.pop(cid, None)
+        with _STATE_LOCK:
+            for cid in {container_id, container.id}:
+                if cid:
+                    _RESTART_BACKOFF.pop(cid, None)
+                    _RESTART_FAIL_COUNT.pop(cid, None)
 
 
 def _check_for_manual_intervention(
@@ -1828,8 +1833,9 @@ def restart_container(
 
         # Step 9: Reset failure counters on success
         if container.id:
-            _RESTART_FAIL_COUNT.pop(container.id, None)
-            _RESTART_BACKOFF.pop(container.id, None)
+            with _STATE_LOCK:
+                _RESTART_FAIL_COUNT.pop(container.id, None)
+                _RESTART_BACKOFF.pop(container.id, None)
 
         if post_update_hook:
             _run_lifecycle_hook(
@@ -2102,6 +2108,7 @@ def run_once(
     except Exception as error:
         LOG.warning("Failed to reconcile failed upgrades: %s", error)
     for container in monitored:
+        marked_in_flight = False
         if settings.rolling_restart:
             project = _compose_project(container)
             if project in rolling_seen:
@@ -2111,339 +2118,350 @@ def run_once(
                     project,
                 )
                 continue
-        deps = _label_dependencies(container, settings) | _link_targets(container)
-        deps = {dep for dep in deps if dep in base_map}
-        skip_container = False
-        for dep in deps:
-            dep_container = base_map.get(dep)
-            if dep_container is None:
+        try:
+            deps = _label_dependencies(container, settings) | _link_targets(container)
+            deps = {dep for dep in deps if dep in base_map}
+            skip_container = False
+            for dep in deps:
+                dep_container = base_map.get(dep)
+                if dep_container is None:
+                    continue
+                try:
+                    dep_state = dep_container.attrs.get("State", {})
+                    dep_running = bool(dep_state.get("Running"))
+                except DockerException:
+                    dep_running = True
+                if not dep_running:
+                    LOG.info("Skipping %s; dependency %s not running", container.name, dep)
+                    skip_container = True
+                    break
+                if _is_unhealthy(dep_container):
+                    LOG.info("Skipping %s; dependency %s unhealthy", container.name, dep)
+                    skip_container = True
+                    break
+            if skip_container:
                 continue
-            try:
-                dep_state = dep_container.attrs.get("State", {})
-                dep_running = bool(dep_state.get("Running"))
-            except DockerException:
-                dep_running = True
-            if not dep_running:
-                LOG.info("Skipping %s; dependency %s not running", container.name, dep)
-                skip_container = True
-                break
-            if _is_unhealthy(dep_container):
-                LOG.info("Skipping %s; dependency %s unhealthy", container.name, dep)
-                skip_container = True
-                break
-        if skip_container:
-            continue
 
-        base_name = _base_name(container)
-        if not _action_allowed(base_name, current_time, settings):
-            continue
+            base_name = _base_name(container)
+            if not _action_allowed(base_name, current_time, settings):
+                continue
 
-        update_due = _cron_matches(container, settings.update_label, current_time)
-        restart_due = _cron_matches(container, settings.restart_label, current_time)
-        recreate_due = _cron_matches(container, settings.recreate_label, current_time)
-        health_due = _cron_matches(container, settings.health_label, current_time)
-        if (update_due or recreate_due or health_due) and _is_swarm_managed(container):
-            LOG.warning(
-                "Skipping %s; swarm-managed containers may lose secrets/configs if recreated",
-                container.name,
-            )
-            if (
-                _should_notify(settings, "restart")
-                or _should_notify(settings, "recreate")
-                or _should_notify(settings, "update")
-                or _should_notify(settings, "health")
-            ):
-                event_log.append(
-                    f"Skipping swarm-managed container {container.name}; secrets/configs not safely restorable"
-                )
-            continue
-        if health_due and not _has_healthcheck(container):
-            if container.id not in _NO_HEALTH_WARNED:
+            update_due = _cron_matches(container, settings.update_label, current_time)
+            restart_due = _cron_matches(container, settings.restart_label, current_time)
+            recreate_due = _cron_matches(container, settings.recreate_label, current_time)
+            health_due = _cron_matches(container, settings.health_label, current_time)
+            if (update_due or recreate_due or health_due) and _is_swarm_managed(container):
                 LOG.warning(
-                    "Container %s has %s label but no healthcheck; skipping health restarts",
+                    "Skipping %s; swarm-managed containers may lose secrets/configs if recreated",
                     container.name,
-                    settings.health_label,
                 )
-                _NO_HEALTH_WARNED.add(container.id)
-            health_due = False
-        recently_started = False
-        if health_due and _has_healthcheck(container):
-            recently_started = _started_recently(
-                container, current_time, settings.health_backoff_seconds
-            )
-        unhealthy_now = health_due and not recently_started and _is_unhealthy(container)
+                if (
+                    _should_notify(settings, "restart")
+                    or _should_notify(settings, "recreate")
+                    or _should_notify(settings, "update")
+                    or _should_notify(settings, "health")
+                ):
+                    event_log.append(
+                        f"Skipping swarm-managed container {container.name}; secrets/configs not safely restorable"
+                    )
+                continue
+            if health_due and not _has_healthcheck(container):
+                if container.id not in _NO_HEALTH_WARNED:
+                    LOG.warning(
+                        "Container %s has %s label but no healthcheck; skipping health restarts",
+                        container.name,
+                        settings.health_label,
+                    )
+                    _NO_HEALTH_WARNED.add(container.id)
+                health_due = False
+            recently_started = False
+            if health_due and _has_healthcheck(container):
+                recently_started = _started_recently(
+                    container, current_time, settings.health_backoff_seconds
+                )
+            unhealthy_now = health_due and not recently_started and _is_unhealthy(container)
 
-        if not any([update_due, restart_due, recreate_due, unhealthy_now]):
-            LOG.debug("Skipping %s; no actions scheduled now", container.name)
-            continue
-
-        image_ref = get_image_reference(container)
-        if image_ref is None:
-            LOG.warning("Skipping %s; missing image reference", container.name)
-            continue
-        mode = _resolve_container_modes(container, settings)
-        labels = container.labels or {}
-        pre_check = labels.get(settings.pre_check_label)
-        post_check = labels.get(settings.post_check_label)
-        pre_update = labels.get(settings.pre_update_label)
-        post_update = labels.get(settings.post_update_label)
-        pre_update_timeout = _resolve_hook_timeout(
-            container, settings.pre_update_timeout_label, settings.hook_timeout_seconds
-        )
-        post_update_timeout = _resolve_hook_timeout(
-            container, settings.post_update_timeout_label, settings.hook_timeout_seconds
-        )
-        if settings.lifecycle_hooks_enabled and pre_check:
-            _run_lifecycle_hook(
-                client,
-                container,
-                pre_check,
-                settings.hook_timeout_seconds,
-                event_log,
-                "pre-check",
-            )
-
-        update_executed = False
-        if update_due:
-            notify_update = _should_notify(settings, "update")
-            old_image_id = current_image_id(container)
-            pulled_image = (
-                None if mode["no_pull"] else pull_image(client, image_ref)
-            )
-            if pulled_image is not None and needs_update(container, pulled_image):
-                LOG.info("Updating %s with image %s", container.name, image_ref)
-                _mark_action(base_name, current_time)
-                if notify_update:
-                    event_log.append(f"Found new {image_ref} image")
-                if settings.dry_run:
-                    LOG.info("Dry-run enabled; not restarting %s", container.name)
-                elif mode["no_restart"]:
-                    LOG.info("No-restart enabled; not recreating %s", container.name)
-                    if notify_update:
-                        event_log.append(
-                            f"Update available for {container.name} but no-restart enabled"
-                        )
-                else:
-                    if _supports_is_upgrade(restart_container):
-                        ok = restart_container(
-                            client,
-                            container,
-                            image_ref,
-                            pulled_image.id,
-                            settings,
-                            event_log,
-                            notify_update,
-                            is_upgrade=True,
-                            pre_update_hook=pre_update if settings.lifecycle_hooks_enabled else None,
-                            post_update_hook=post_update if settings.lifecycle_hooks_enabled else None,
-                            pre_update_timeout=pre_update_timeout,
-                            post_update_timeout=post_update_timeout,
-                        )
-                    else:
-                        ok = restart_container(
-                            client,
-                            container,
-                            image_ref,
-                            pulled_image.id,
-                            settings,
-                            event_log,
-                            notify_update,
-                            pre_update_hook=pre_update if settings.lifecycle_hooks_enabled else None,
-                            post_update_hook=post_update if settings.lifecycle_hooks_enabled else None,
-                            pre_update_timeout=pre_update_timeout,
-                            post_update_timeout=post_update_timeout,
-                        )
-                    if ok:
-                        remove_old_image(
-                            client,
-                            old_image_id,
-                            pulled_image.id,
-                            event_log,
-                            notify_update,
-                        )
-                        update_executed = True
-                        _metric_increment("containers_updated")
-                        if settings.rolling_restart:
-                            rolling_seen.add(_compose_project(container))
-                    else:
-                        _metric_increment("containers_failed")
-            elif pulled_image is not None:
-                LOG.debug("%s is up-to-date", container.name)
-            elif mode["no_pull"]:
-                LOG.info("No-pull enabled; skipping update check for %s", container.name)
-            elif notify_update:
-                event_log.append(f"Failed to pull {image_ref} for {container.name}")
-                _metric_increment("containers_failed")
-            if update_executed:
+            if not any([update_due, restart_due, recreate_due, unhealthy_now]):
+                LOG.debug("Skipping %s; no actions scheduled now", container.name)
                 continue
 
-        if recreate_due and not unhealthy_now and not update_executed:
-            if not _restart_allowed(
+            image_ref = get_image_reference(container)
+            if image_ref is None:
+                LOG.warning("Skipping %s; missing image reference", container.name)
+                continue
+            mode = _resolve_container_modes(container, settings)
+            labels = container.labels or {}
+            pre_check = labels.get(settings.pre_check_label)
+            post_check = labels.get(settings.post_check_label)
+            pre_update = labels.get(settings.pre_update_label)
+            post_update = labels.get(settings.post_update_label)
+            pre_update_timeout = _resolve_hook_timeout(
+                container, settings.pre_update_timeout_label, settings.hook_timeout_seconds
+            )
+            post_update_timeout = _resolve_hook_timeout(
+                container, settings.post_update_timeout_label, settings.hook_timeout_seconds
+            )
+            if settings.lifecycle_hooks_enabled and pre_check:
+                _run_lifecycle_hook(
+                    client,
+                    container,
+                    pre_check,
+                    settings.hook_timeout_seconds,
+                    event_log,
+                    "pre-check",
+                )
+
+            update_executed = False
+            if update_due:
+                notify_update = _should_notify(settings, "update")
+                old_image_id = current_image_id(container)
+                pulled_image = (
+                    None if mode["no_pull"] else pull_image(client, image_ref)
+                )
+                if pulled_image is not None and needs_update(container, pulled_image):
+                    LOG.info("Updating %s with image %s", container.name, image_ref)
+                    _mark_action(base_name, current_time)
+                    marked_in_flight = True
+                    if notify_update:
+                        event_log.append(f"Found new {image_ref} image")
+                    if settings.dry_run:
+                        LOG.info("Dry-run enabled; not restarting %s", container.name)
+                    elif mode["no_restart"]:
+                        LOG.info("No-restart enabled; not recreating %s", container.name)
+                        if notify_update:
+                            event_log.append(
+                                f"Update available for {container.name} but no-restart enabled"
+                            )
+                    else:
+                        if _supports_is_upgrade(restart_container):
+                            ok = restart_container(
+                                client,
+                                container,
+                                image_ref,
+                                pulled_image.id,
+                                settings,
+                                event_log,
+                                notify_update,
+                                is_upgrade=True,
+                                pre_update_hook=pre_update if settings.lifecycle_hooks_enabled else None,
+                                post_update_hook=post_update if settings.lifecycle_hooks_enabled else None,
+                                pre_update_timeout=pre_update_timeout,
+                                post_update_timeout=post_update_timeout,
+                            )
+                        else:
+                            ok = restart_container(
+                                client,
+                                container,
+                                image_ref,
+                                pulled_image.id,
+                                settings,
+                                event_log,
+                                notify_update,
+                                pre_update_hook=pre_update if settings.lifecycle_hooks_enabled else None,
+                                post_update_hook=post_update if settings.lifecycle_hooks_enabled else None,
+                                pre_update_timeout=pre_update_timeout,
+                                post_update_timeout=post_update_timeout,
+                            )
+                        if ok:
+                            remove_old_image(
+                                client,
+                                old_image_id,
+                                pulled_image.id,
+                                event_log,
+                                notify_update,
+                            )
+                            update_executed = True
+                            _metric_increment("containers_updated")
+                            if settings.rolling_restart:
+                                rolling_seen.add(_compose_project(container))
+                        else:
+                            _metric_increment("containers_failed")
+                elif pulled_image is not None:
+                    LOG.debug("%s is up-to-date", container.name)
+                elif mode["no_pull"]:
+                    LOG.info("No-pull enabled; skipping update check for %s", container.name)
+                elif notify_update:
+                    event_log.append(f"Failed to pull {image_ref} for {container.name}")
+                    _metric_increment("containers_failed")
+                if update_executed:
+                    continue
+
+            if recreate_due and not unhealthy_now and not update_executed:
+                if not _restart_allowed(
+                    container.id, base_name, current_time, settings
+                ):
+                    if (
+                        _should_notify(settings, "restart")
+                        or _should_notify(settings, "recreate")
+                        or _should_notify(settings, "update")
+                        or _should_notify(settings, "health")
+                    ):
+                        with _STATE_LOCK:
+                            backoff_until = _RESTART_BACKOFF.get(container.id)
+                        if backoff_until is not None:
+                            _notify_restart_backoff(
+                                container.name,
+                                container.id,
+                                backoff_until,
+                                event_log,
+                                settings,
+                            )
+                    continue
+
+                LOG.info("Recreating %s (scheduled recreate)", container.name)
+                _mark_action(base_name, current_time)
+                marked_in_flight = True
+                if settings.dry_run:
+                    LOG.info("Dry-run enabled; not recreating %s", container.name)
+                    continue
+                if mode["no_restart"]:
+                    LOG.info("No-restart enabled; not recreating %s", container.name)
+                    continue
+                notify_recreate = _should_notify(settings, "recreate")
+                image_id = current_image_id(container)
+                if notify_recreate:
+                    event_log.append(
+                        f"Recreating {container.name} (scheduled recreate) ({_image_display_name(image_ref=image_ref)})"
+                    )
+                if restart_container(
+                    client,
+                    container,
+                    image_ref,
+                    image_id,
+                    settings,
+                    event_log,
+                    notify_recreate,
+                    pre_update_hook=pre_update if settings.lifecycle_hooks_enabled else None,
+                    post_update_hook=post_update if settings.lifecycle_hooks_enabled else None,
+                    pre_update_timeout=pre_update_timeout,
+                    post_update_timeout=post_update_timeout,
+                ):
+                    _metric_increment("containers_updated")
+                    if settings.rolling_restart:
+                        rolling_seen.add(_compose_project(container))
+                else:
+                    _metric_increment("containers_failed")
+                continue
+
+            if unhealthy_now and not _health_allowed(
                 container.id, base_name, current_time, settings
             ):
-                if (
-                    _should_notify(settings, "restart")
-                    or _should_notify(settings, "recreate")
-                    or _should_notify(settings, "update")
-                    or _should_notify(settings, "health")
-                ):
-                    backoff_until = _RESTART_BACKOFF.get(container.id)
-                    if backoff_until is not None:
-                        _notify_restart_backoff(
-                            container.name,
-                            container.id,
-                            backoff_until,
-                            event_log,
-                            settings,
+                continue
+            if health_due and recently_started:
+                LOG.debug("Skipping %s; healthcheck still in grace window", container.name)
+                continue
+            if restart_due and not unhealthy_now:
+                LOG.info("Restarting %s (scheduled restart)", container.name)
+                _mark_action(base_name, current_time)
+                marked_in_flight = True
+                if settings.dry_run:
+                    LOG.info("Dry-run enabled; not restarting %s", container.name)
+                    continue
+                if mode["no_restart"]:
+                    LOG.info("No-restart enabled; not restarting %s", container.name)
+                    continue
+                notify_restart = _should_notify(settings, "restart")
+                image_id = current_image_id(container)
+                try:
+                    container.restart()
+                    if notify_restart:
+                        event_log.append(
+                            f"Restarted {container.name} (scheduled restart) ({_image_display_name(image_ref=image_ref)})"
                         )
-                continue
-
-            LOG.info("Recreating %s (scheduled recreate)", container.name)
-            _mark_action(base_name, current_time)
-            if settings.dry_run:
-                LOG.info("Dry-run enabled; not recreating %s", container.name)
-                continue
-            if mode["no_restart"]:
-                LOG.info("No-restart enabled; not recreating %s", container.name)
-                continue
-            notify_recreate = _should_notify(settings, "recreate")
-            image_id = current_image_id(container)
-            if notify_recreate:
-                event_log.append(
-                    f"Recreating {container.name} (scheduled recreate) ({_image_display_name(image_ref=image_ref)})"
-                )
-            if restart_container(
-                client,
-                container,
-                image_ref,
-                image_id,
-                settings,
-                event_log,
-                notify_recreate,
-                pre_update_hook=pre_update if settings.lifecycle_hooks_enabled else None,
-                post_update_hook=post_update if settings.lifecycle_hooks_enabled else None,
-                pre_update_timeout=pre_update_timeout,
-                post_update_timeout=post_update_timeout,
-            ):
-                _metric_increment("containers_updated")
-                if settings.rolling_restart:
-                    rolling_seen.add(_compose_project(container))
-            else:
-                _metric_increment("containers_failed")
-            continue
-
-        if unhealthy_now and not _health_allowed(
-            container.id, base_name, current_time, settings
-        ):
-            continue
-        if health_due and recently_started:
-            LOG.debug("Skipping %s; healthcheck still in grace window", container.name)
-            continue
-        if restart_due and not unhealthy_now:
-            LOG.info("Restarting %s (scheduled restart)", container.name)
-            _mark_action(base_name, current_time)
-            if settings.dry_run:
-                LOG.info("Dry-run enabled; not restarting %s", container.name)
-                continue
-            if mode["no_restart"]:
-                LOG.info("No-restart enabled; not restarting %s", container.name)
-                continue
-            notify_restart = _should_notify(settings, "restart")
-            image_id = current_image_id(container)
-            try:
-                container.restart()
-                if notify_restart:
-                    event_log.append(
-                        f"Restarted {container.name} (scheduled restart) ({_image_display_name(image_ref=image_ref)})"
+                    _metric_increment("containers_updated")
+                    if settings.rolling_restart:
+                        rolling_seen.add(_compose_project(container))
+                except DockerException as error:
+                    LOG.error("Failed to restart %s: %s", container.name, error)
+                    if notify_restart:
+                        event_log.append(f"Failed to restart {container.name}: {error}")
+                    _metric_increment("containers_failed")
+                    _register_restart_failure(
+                        container.id,
+                        container.name,
+                        notify_restart,
+                        event_log,
+                        settings,
+                        error,
                     )
-                _metric_increment("containers_updated")
-                if settings.rolling_restart:
-                    rolling_seen.add(_compose_project(container))
-            except DockerException as error:
-                LOG.error("Failed to restart %s: %s", container.name, error)
-                if notify_restart:
-                    event_log.append(f"Failed to restart {container.name}: {error}")
-                _metric_increment("containers_failed")
-                _register_restart_failure(
-                    container.id,
-                    container.name,
-                    notify_restart,
-                    event_log,
-                    settings,
-                    error,
-                )
-            continue
-
-        if unhealthy_now:
-            if not _restart_allowed(container.id, base_name, current_time, settings):
-                if (
-                    _should_notify(settings, "restart")
-                    or _should_notify(settings, "recreate")
-                    or _should_notify(settings, "update")
-                    or _should_notify(settings, "health")
-                ):
-                    backoff_until = _RESTART_BACKOFF.get(container.id)
-                    if backoff_until is not None:
-                        _notify_restart_backoff(
-                            container.name,
-                            container.id,
-                            backoff_until,
-                            event_log,
-                            settings,
-                        )
                 continue
 
-            LOG.info("Restarting %s due to unhealthy", container.name)
-            _mark_action(base_name, current_time)
-            if settings.dry_run:
-                LOG.info("Dry-run enabled; not restarting %s", container.name)
-                continue
-            if mode["no_restart"]:
-                LOG.info("No-restart enabled; not restarting %s", container.name)
-                continue
-            notify_event = _should_notify(settings, "health") or _should_notify(
-                settings, "health_check"
-            )
-            new_image_id = current_image_id(container)
-            if restart_container(
-                client,
-                container,
-                image_ref,
-                new_image_id,
-                settings,
-                event_log,
-                notify_event,
-                pre_update_hook=pre_update if settings.lifecycle_hooks_enabled else None,
-                post_update_hook=post_update if settings.lifecycle_hooks_enabled else None,
-                pre_update_timeout=pre_update_timeout,
-                post_update_timeout=post_update_timeout,
-            ):
-                _HEALTH_BACKOFF[container.id] = current_time + timedelta(
-                    seconds=settings.health_backoff_seconds
-                )
-                _save_health_backoff(settings.state_file)
-                if _should_notify(settings, "health") or _should_notify(
+            if unhealthy_now:
+                if not _restart_allowed(container.id, base_name, current_time, settings):
+                    if (
+                        _should_notify(settings, "restart")
+                        or _should_notify(settings, "recreate")
+                        or _should_notify(settings, "update")
+                        or _should_notify(settings, "health")
+                    ):
+                        with _STATE_LOCK:
+                            backoff_until = _RESTART_BACKOFF.get(container.id)
+                        if backoff_until is not None:
+                            _notify_restart_backoff(
+                                container.name,
+                                container.id,
+                                backoff_until,
+                                event_log,
+                                settings,
+                            )
+                    continue
+
+                LOG.info("Restarting %s due to unhealthy", container.name)
+                _mark_action(base_name, current_time)
+                marked_in_flight = True
+                if settings.dry_run:
+                    LOG.info("Dry-run enabled; not restarting %s", container.name)
+                    continue
+                if mode["no_restart"]:
+                    LOG.info("No-restart enabled; not restarting %s", container.name)
+                    continue
+                notify_event = _should_notify(settings, "health") or _should_notify(
                     settings, "health_check"
+                )
+                new_image_id = current_image_id(container)
+                if restart_container(
+                    client,
+                    container,
+                    image_ref,
+                    new_image_id,
+                    settings,
+                    event_log,
+                    notify_event,
+                    pre_update_hook=pre_update if settings.lifecycle_hooks_enabled else None,
+                    post_update_hook=post_update if settings.lifecycle_hooks_enabled else None,
+                    pre_update_timeout=pre_update_timeout,
+                    post_update_timeout=post_update_timeout,
                 ):
-                    event_log.append(
-                        f"Restarted {container.name} after failed health check ({_image_display_name(image_ref=image_ref)})"
-                    )
-                _metric_increment("containers_updated")
-                if settings.rolling_restart:
-                    rolling_seen.add(_compose_project(container))
-            elif notify_event:
-                event_log.append(f"Failed to restart {container.name}")
-                _metric_increment("containers_failed")
+                    with _STATE_LOCK:
+                        _HEALTH_BACKOFF[container.id] = current_time + timedelta(
+                            seconds=settings.health_backoff_seconds
+                        )
+                    _save_health_backoff(settings.state_file)
+                    if _should_notify(settings, "health") or _should_notify(
+                        settings, "health_check"
+                    ):
+                        event_log.append(
+                            f"Restarted {container.name} after failed health check ({_image_display_name(image_ref=image_ref)})"
+                        )
+                    _metric_increment("containers_updated")
+                    if settings.rolling_restart:
+                        rolling_seen.add(_compose_project(container))
+                elif notify_event:
+                    event_log.append(f"Failed to restart {container.name}")
+                    _metric_increment("containers_failed")
 
-        if settings.lifecycle_hooks_enabled and post_check:
-            _run_lifecycle_hook(
-                client,
-                container,
-                post_check,
-                settings.hook_timeout_seconds,
-                event_log,
-                "post-check",
-            )
+            if settings.lifecycle_hooks_enabled and post_check:
+                _run_lifecycle_hook(
+                    client,
+                    container,
+                    post_check,
+                    settings.hook_timeout_seconds,
+                    event_log,
+                    "post-check",
+                )
+        finally:
+            if marked_in_flight:
+                _clear_in_flight(base_name)
 
     if prune_due:
         notify_prune = _should_notify(settings, "prune")
