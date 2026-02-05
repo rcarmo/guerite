@@ -13,6 +13,7 @@ from .config import Settings, load_settings
 from .monitor import (
     _action_allowed,
     _strip_guerite_suffix,
+    HttpServer,
     next_prune_time,
     next_wakeup,
     run_once,
@@ -142,6 +143,12 @@ def main() -> None:
     client = build_client_with_retry(settings)
     LOG.info("Starting Guerite")
     wake_signal = Event()
+    http_trigger: Optional[Event] = None
+    http_server: Optional[HttpServer] = None
+    if settings.http_api_enabled:
+        http_trigger = Event()
+        http_server = HttpServer(settings, wake_signal, http_trigger)
+        http_server.start()
     start_event_listener(client, settings, wake_signal)
     logged_schedule = False
     hostname = gethostname()
@@ -175,6 +182,9 @@ def main() -> None:
                 LOG.info("No upcoming checks found")
             logged_schedule = True
         run_once(client, settings, timestamp=timestamp, containers=containers)
+        if settings.run_once:
+            LOG.info("Run-once enabled; exiting after single cycle")
+            return
         next_run_at, next_name, next_label = next_wakeup(containers, settings, reference=timestamp)
         delta_seconds = (next_run_at - now_tz(settings.timezone)).total_seconds()
         sleep_seconds = max(1, int(ceil(delta_seconds)))
@@ -185,12 +195,19 @@ def main() -> None:
             _format_reason(next_name, next_label),
         )
         woke = wake_signal.wait(timeout=sleep_seconds)
+        if not woke and http_trigger is not None and http_trigger.is_set():
+            woke = True
         if woke:
             wake_signal.clear()
-            LOG.debug("Woken early by Docker event")
+            if http_trigger is not None and http_trigger.is_set():
+                LOG.debug("Woken early by HTTP API")
+                http_trigger.clear()
+                current_reason_source = "http_api"
+            else:
+                LOG.debug("Woken early by Docker event")
+                current_reason_source = "docker_event"
             current_reason_name = None
             current_reason_label = None
-            current_reason_source = "docker_event"
         else:
             current_reason_name = next_name
             current_reason_label = next_label

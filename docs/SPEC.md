@@ -21,6 +21,10 @@ It is inspired by Watchtower but, like a Guerite (a small fortification), it aim
 - Bind mounts are preflight-checked for missing host paths, and non-local volume drivers log warnings before a recreate.
 - Optional cron-driven image pruning removes unused images; failures are logged and can be notified.
 - New monitored containers trigger a detect notification, batched to at most one per minute when enabled.
+- Monitor-only and no-restart modes allow detecting updates without recreating containers.
+- No-pull mode skips image pulls during update checks.
+- Optional rolling restart limits updates to one container per compose project per cycle.
+- HTTP API can trigger on-demand runs and expose optional Prometheus-style metrics.
 
 ## Configuration
 
@@ -45,6 +49,29 @@ It is inspired by Watchtower but, like a Guerite (a small fortification), it aim
 | `GUERITE_PUSHOVER_TOKEN`               | unset                                      | Pushover app token; required to send Pushover notifications.                                                                                                           |
 | `GUERITE_PUSHOVER_USER`                | unset                                      | Pushover user/group key; required to send Pushover notifications.                                                                                                      |
 | `GUERITE_PUSHOVER_API`                 | `https://api.pushover.net/1/messages.json` | Pushover endpoint override.                                                                                                                                            |
+| `GUERITE_MONITOR_ONLY`                 | `false`                                    | If `true`, do not restart or recreate containers (monitor-only).                                                                                                       |
+| `GUERITE_NO_PULL`                      | `false`                                    | If `true`, skip pulling images for update checks.                                                                                                                      |
+| `GUERITE_NO_RESTART`                   | `false`                                    | If `true`, skip restarts/recreates for updates or health.                                                                                                              |
+| `GUERITE_ROLLING_RESTART`              | `false`                                    | If `true`, only one update/recreate per compose project per cycle.                                                                                                     |
+| `GUERITE_STOP_TIMEOUT_SECONDS`         | unset                                      | Optional stop timeout (seconds) when stopping old containers.                                                                                                          |
+| `GUERITE_RUN_ONCE`                      | `false`                                   | If `true`, perform one cycle and exit.                                                                                                                                 |
+| `GUERITE_HTTP_API`                     | `false`                                    | Enable the HTTP API.                                                                                                                                                   |
+| `GUERITE_HTTP_API_HOST`                | `0.0.0.0`                                  | Bind address for the HTTP API.                                                                                                                                         |
+| `GUERITE_HTTP_API_PORT`                | `8080`                                     | Bind port for the HTTP API.                                                                                                                                            |
+| `GUERITE_HTTP_API_TOKEN`               | unset                                      | Optional bearer token for the HTTP API.                                                                                                                                |
+| `GUERITE_HTTP_API_METRICS`             | `false`                                    | If `true`, expose `/v1/metrics`.                                                                                                                                       |
+| `GUERITE_SCOPE`                        | unset                                      | Optional scope value to filter monitored containers.                                                                                                                   |
+| `GUERITE_SCOPE_LABEL`                  | `guerite.scope`                            | Label key used for scope matching.                                                                                                                                     |
+| `GUERITE_INCLUDE_CONTAINERS`           | unset                                      | Comma/space list of container names to include.                                                                                                                        |
+| `GUERITE_EXCLUDE_CONTAINERS`           | unset                                      | Comma/space list of container names to exclude.                                                                                                                        |
+| `GUERITE_HOOK_TIMEOUT_SECONDS`         | `60`                                       | Default timeout (seconds) for lifecycle hook execution.                                                                                                                |
+| `GUERITE_LIFECYCLE_HOOKS`              | `false`                                    | Enable lifecycle hooks for labeled containers.                                                                                                                         |
+| `GUERITE_PRE_CHECK_LABEL`              | `guerite.lifecycle.pre_check`              | Label key for pre-check lifecycle hook command.                                                                                                                        |
+| `GUERITE_PRE_UPDATE_LABEL`             | `guerite.lifecycle.pre_update`             | Label key for pre-update lifecycle hook command.                                                                                                                       |
+| `GUERITE_POST_UPDATE_LABEL`            | `guerite.lifecycle.post_update`            | Label key for post-update lifecycle hook command.                                                                                                                      |
+| `GUERITE_POST_CHECK_LABEL`             | `guerite.lifecycle.post_check`             | Label key for post-check lifecycle hook command.                                                                                                                       |
+| `GUERITE_PRE_UPDATE_TIMEOUT_LABEL`     | `guerite.lifecycle.pre_update_timeout_seconds` | Label key for pre-update hook timeout (seconds).                                                                                                                  |
+| `GUERITE_POST_UPDATE_TIMEOUT_LABEL`    | `guerite.lifecycle.post_update_timeout_seconds` | Label key for post-update hook timeout (seconds).                                                                                                                 |
 
 ## Notifications
 
@@ -70,3 +97,23 @@ Example labels:
 
 - `guerite.depends_on=db,cache`
 - `guerite.update=*/10 * * * *`
+
+## HTTP API
+
+When `GUERITE_HTTP_API=true`, Guerite exposes:
+
+- `POST /v1/update` to trigger an immediate cycle.
+- `GET /v1/metrics` (when `GUERITE_HTTP_API_METRICS=true`) for Prometheus-style metrics.
+
+If `GUERITE_HTTP_API_TOKEN` is set, requests must include `Authorization: Bearer <token>`.
+
+## Lifecycle hooks
+
+If `GUERITE_LIFECYCLE_HOOKS=true`, Guerite executes hook commands inside containers:
+
+- Pre-check (`guerite.lifecycle.pre_check`) before evaluating updates.
+- Pre-update (`guerite.lifecycle.pre_update`) before recreate/update.
+- Post-update (`guerite.lifecycle.post_update`) after recreate/update.
+- Post-check (`guerite.lifecycle.post_check`) after the cycle.
+
+Hook failures are logged and do not stop the update flow.

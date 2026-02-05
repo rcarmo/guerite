@@ -17,7 +17,7 @@ def test_run_once_triggers_update_and_restart(monkeypatch, settings: Settings):
     monkeypatch.setattr(monitor, "pull_image", lambda client, image_ref: DummyImage("new"))
     monkeypatch.setattr(monitor, "needs_update", lambda cont, img: True)
 
-    def fake_restart(client, cont, image_ref, new_image_id, cfg, event_log, notify):
+    def fake_restart(client, cont, image_ref, new_image_id, cfg, event_log, notify, **kwargs):
         calls.append((cont.name, image_ref, new_image_id))
         return True
 
@@ -35,6 +35,34 @@ def test_run_once_triggers_update_and_restart(monkeypatch, settings: Settings):
 
     assert ("app", "repo:tag", "new") in calls
     assert ("remove", "old", "new") in calls
+
+
+def test_run_once_no_restart_skips_recreate(monkeypatch, settings: Settings):
+    container = DummyContainer(
+        "app",
+        labels={settings.update_label: "* * * * *", settings.no_restart_label: "true"},
+    )
+
+    monkeypatch.setattr(monitor, "select_monitored_containers", lambda client, cfg: [container])
+    monkeypatch.setattr(monitor, "pull_image", lambda client, image_ref: DummyImage("new"))
+    monkeypatch.setattr(monitor, "needs_update", lambda cont, img: True)
+
+    called = False
+
+    def fake_restart(*args, **kwargs):
+        nonlocal called
+        called = True
+        return True
+
+    monkeypatch.setattr(monitor, "restart_container", fake_restart)
+    monkeypatch.setattr(monitor, "remove_old_image", lambda *args, **kwargs: None)
+    monkeypatch.setattr(monitor, "notify_pushover", lambda *args, **kwargs: None)
+    monkeypatch.setattr(monitor, "notify_webhook", lambda *args, **kwargs: None)
+
+    now = datetime(2025, 12, 24, 12, 0, tzinfo=timezone.utc)
+    monitor.run_once(DummyClient(), settings, timestamp=now)
+
+    assert called is False
 
 
 def test_run_once_skips_when_in_cooldown(monkeypatch, settings: Settings):

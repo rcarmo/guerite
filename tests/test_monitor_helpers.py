@@ -64,3 +64,32 @@ def test_order_by_compose_sorts_by_dependencies(settings: Settings):
     ordered = monitor._order_by_compose(unordered, settings)
     assert ordered[0].name == "db"
     assert {item.name for item in ordered} == {"app", "cache", "db"}
+
+
+def test_resolve_container_modes_defaults(settings: Settings):
+    container = DummyContainer("app", labels={})
+    modes = monitor._resolve_container_modes(container, settings)
+    assert modes["monitor_only"] is False
+    assert modes["no_pull"] is False
+    assert modes["no_restart"] is False
+
+
+def test_resolve_container_modes_overrides(settings: Settings):
+    container = DummyContainer(
+        "app",
+        labels={
+            settings.monitor_only_label: "true",
+            settings.no_pull_label: "true",
+            settings.no_restart_label: "false",
+        },
+    )
+    modes = monitor._resolve_container_modes(container, settings)
+    assert modes["monitor_only"] is True
+    assert modes["no_pull"] is True
+    assert modes["no_restart"] is True
+
+
+def test_metrics_snapshot_returns_copy():
+    snapshot = monitor.metrics_snapshot()
+    snapshot["scans_total"] = 999
+    assert monitor.metrics_snapshot()["scans_total"] != 999

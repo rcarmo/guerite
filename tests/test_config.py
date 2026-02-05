@@ -3,7 +3,15 @@ from datetime import timezone
 import pytest
 
 from guerite import utils
-from guerite.config import ALL_NOTIFICATION_EVENTS, Settings, _env_bool, _env_csv_set, _env_int, load_settings
+from guerite.config import (
+    ALL_NOTIFICATION_EVENTS,
+    Settings,
+    _env_bool,
+    _env_csv_set,
+    _env_csv_list,
+    _env_int,
+    load_settings,
+)
 from guerite import monitor
 
 
@@ -29,6 +37,16 @@ def test_env_int(monkeypatch):
 def test_env_csv_set(monkeypatch, env_var, env_value, expected):
     monkeypatch.setenv(env_var, env_value)
     assert _env_csv_set(env_var, "update") == expected
+
+
+@pytest.mark.parametrize("env_var,env_value,expected", [
+    ("CSV_LIST", "one,two", {"one", "two"}),
+    ("CSV_LIST", "one two", {"one", "two"}),
+    ("CSV_LIST", "", set()),
+])
+def test_env_csv_list(monkeypatch, env_var, env_value, expected):
+    monkeypatch.setenv(env_var, env_value)
+    assert _env_csv_list(env_var, "") == expected
 
 
 @pytest.mark.parametrize("tz,expect_warning", [

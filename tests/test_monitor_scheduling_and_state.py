@@ -36,6 +36,9 @@ class DummyClient:
         self.images = type("I", (), {})()
         self.api.prune_images_called = False
         self.api.prune_images = lambda **kwargs: (_ for _ in ()).throw(RuntimeError("should not prune"))
+        self.api.exec_create = lambda *args, **kwargs: {"Id": "exec-id"}
+        self.api.exec_start = lambda *args, **kwargs: None
+        self.api.exec_inspect = lambda *args, **kwargs: {"ExitCode": 0}
 
 
 @pytest.fixture(autouse=True)
@@ -86,6 +89,32 @@ def settings(tmp_path) -> Settings:
         restart_retry_limit=3,
         depends_label="guerite.depends_on",
         action_cooldown_seconds=60,
+        monitor_only=False,
+        no_pull=False,
+        no_restart=False,
+        monitor_only_label="guerite.monitor_only",
+        no_pull_label="guerite.no_pull",
+        no_restart_label="guerite.no_restart",
+        scope_label="guerite.scope",
+        scope=None,
+        include_containers=set(),
+        exclude_containers=set(),
+        rolling_restart=False,
+        stop_timeout_seconds=None,
+        lifecycle_hooks_enabled=False,
+        hook_timeout_seconds=60,
+        pre_check_label="guerite.lifecycle.pre_check",
+        pre_update_label="guerite.lifecycle.pre_update",
+        post_update_label="guerite.lifecycle.post_update",
+        post_check_label="guerite.lifecycle.post_check",
+        pre_update_timeout_label="guerite.lifecycle.pre_update_timeout_seconds",
+        post_update_timeout_label="guerite.lifecycle.post_update_timeout_seconds",
+        http_api_enabled=False,
+        http_api_host="0.0.0.0",
+        http_api_port=8080,
+        http_api_token=None,
+        http_api_metrics=False,
+        run_once=False,
     )
 
 

@@ -1,5 +1,6 @@
 import pytest
 from datetime import datetime, timezone
+from types import SimpleNamespace
 
 import guerite.__main__ as main_mod
 from guerite.config import Settings
@@ -114,6 +115,7 @@ def test_main_loop_runs_single_iteration(monkeypatch, settings: Settings):
     monkeypatch.setattr(main_mod, "configure_logging", lambda level: None)
     monkeypatch.setattr(main_mod, "build_client_with_retry", lambda cfg: DummyClient())
     monkeypatch.setattr(main_mod, "start_event_listener", lambda client, cfg, signal: None)
+    monkeypatch.setattr(main_mod, "HttpServer", lambda *args, **kwargs: SimpleNamespace(start=lambda: None))
     monkeypatch.setattr(main_mod, "select_monitored_containers", lambda client, cfg: [])
     monkeypatch.setattr(main_mod, "schedule_summary", lambda containers, cfg, reference: [])
     monkeypatch.setattr(main_mod, "next_prune_time", lambda cfg, reference: None)

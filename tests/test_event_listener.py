@@ -1,8 +1,6 @@
 from threading import Event
 from datetime import datetime, timezone
 
-import pytest
-
 from guerite import monitor
 import guerite.__main__ as main_mod
 from guerite.__main__ import is_monitored_event, start_event_listener

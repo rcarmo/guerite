@@ -73,6 +73,7 @@ class DummyAPI:
         self.prune_images_error: Optional[Exception] = None
         self.endpoint_kwargs: dict = {}
         self.remove_failures_remaining: int = 0
+        self.exec_exit_code: int = 0
 
     def rename(self, cid, name):
         self.calls.append(("rename", cid, name))
@@ -111,6 +112,18 @@ class DummyAPI:
         if self.prune_images_error:
             raise self.prune_images_error
         return self.prune_images_result or {}
+
+    def exec_create(self, *args, **kwargs):
+        self.calls.append(("exec_create", args, kwargs))
+        return {"Id": "exec-id"}
+
+    def exec_start(self, *args, **kwargs):
+        self.calls.append(("exec_start", args, kwargs))
+        return None
+
+    def exec_inspect(self, *args, **kwargs):
+        self.calls.append(("exec_inspect", args, kwargs))
+        return {"ExitCode": self.exec_exit_code}
 
 
 class DummyImages:
@@ -209,6 +222,32 @@ def settings() -> Settings:
         restart_retry_limit=3,
         depends_label="guerite.depends_on",
         action_cooldown_seconds=60,
+        monitor_only=False,
+        no_pull=False,
+        no_restart=False,
+        monitor_only_label="guerite.monitor_only",
+        no_pull_label="guerite.no_pull",
+        no_restart_label="guerite.no_restart",
+        scope_label="guerite.scope",
+        scope=None,
+        include_containers=set(),
+        exclude_containers=set(),
+        rolling_restart=False,
+        stop_timeout_seconds=None,
+        lifecycle_hooks_enabled=False,
+        hook_timeout_seconds=60,
+        pre_check_label="guerite.lifecycle.pre_check",
+        pre_update_label="guerite.lifecycle.pre_update",
+        post_update_label="guerite.lifecycle.post_update",
+        post_check_label="guerite.lifecycle.post_check",
+        pre_update_timeout_label="guerite.lifecycle.pre_update_timeout_seconds",
+        post_update_timeout_label="guerite.lifecycle.post_update_timeout_seconds",
+        http_api_enabled=False,
+        http_api_host="0.0.0.0",
+        http_api_port=8080,
+        http_api_token=None,
+        http_api_metrics=False,
+        run_once=False,
     )
 
 

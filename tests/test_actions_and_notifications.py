@@ -1,5 +1,3 @@
-import pytest
-
 from guerite import monitor
 from guerite.config import Settings
 from guerite import notifier

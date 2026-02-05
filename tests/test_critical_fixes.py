@@ -99,6 +99,34 @@ class TestCriticalFunctionBehavior:
         # Function should return empty list when all labels fail
         assert result == []
 
+    def test_select_monitored_containers_scope_and_filters(self):
+        client = MagicMock()
+
+        container1 = MagicMock()
+        container1.name = "app1"
+        container1.id = "container1-id"
+        container1.labels = {"guerite.update": "0 0 * * *", "guerite.scope": "edge"}
+
+        container2 = MagicMock()
+        container2.name = "app2"
+        container2.id = "container2-id"
+        container2.labels = {"guerite.restart": "0 1 * * *", "guerite.scope": "core"}
+
+        client.containers.list.return_value = [container1, container2]
+
+        with patch.dict(
+            os.environ,
+            {
+                "GUERITE_SCOPE": "edge",
+                "GUERITE_INCLUDE_CONTAINERS": "app1,app2",
+                "GUERITE_EXCLUDE_CONTAINERS": "app2",
+            },
+        ):
+            settings = load_settings()
+            result = select_monitored_containers(client, settings)
+
+        assert [container.id for container in result] == ["container1-id"]
+
 
 class TestMostImportantFunctionPaths:
     """Focus on testing the most critical paths that could cause real issues."""

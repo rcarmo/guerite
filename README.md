@@ -61,6 +61,12 @@ Configure Guerite using environment variables. Here are the most commonly used:
 | `GUERITE_TZ`             | `UTC`    | Time zone for evaluating cron expressions.                                                               |
 | `GUERITE_LOG_LEVEL`      | `INFO`   | Log level (`DEBUG`, `INFO`, etc.).                                                                       |
 | `GUERITE_PRUNE_CRON`     | unset    | Cron expression to periodically prune unused images. When unset, pruning is skipped.                     |
+| `GUERITE_MONITOR_ONLY`   | `false`  | If `true`, do not restart or recreate containers (monitor-only).                                         |
+| `GUERITE_NO_PULL`        | `false`  | If `true`, skip pulling images for update checks.                                                        |
+| `GUERITE_NO_RESTART`     | `false`  | If `true`, skip restarts/recreates for updates or health.                                                 |
+| `GUERITE_ROLLING_RESTART`| `false`  | If `true`, only one update/recreate per compose project per cycle.                                       |
+| `GUERITE_HTTP_API`       | `false`  | If `true`, enable the HTTP API (trigger updates, metrics).                                               |
+| `GUERITE_HTTP_API_TOKEN` | unset    | Optional bearer token for the HTTP API.                                                                  |
 | `GUERITE_NOTIFICATIONS`  | `update` | Events to notify on: `update`, `restart`, `recreate`, `health`, `startup`, `detect`, `prune`, or `all`. |
 | `GUERITE_PUSHOVER_TOKEN` | unset    | Pushover app token for notifications.                                                                    |
 | `GUERITE_PUSHOVER_USER`  | unset    | Pushover user/group key for notifications.                                                               |
@@ -77,6 +83,14 @@ Add labels to any container you want Guerite to manage (any label opts the conta
 - `guerite.recreate=0 4 * * *` schedules forced container recreation at the specified cron times (no image pull).
 - `guerite.health_check=*/5 * * * *` runs a health check on the cron schedule; if the container is not `healthy`, it is restarted (rate-limited by the backoff).
 - `guerite.depends_on=db,cache` declares dependencies (by container base name) so this container is processed after its dependencies are running and healthy; also used to order operations within a compose project.
+- `guerite.monitor_only=true` overrides monitor-only behavior for this container.
+- `guerite.no_pull=true` skips image pulls for this container.
+- `guerite.no_restart=true` skips restarts/recreates for this container.
+- `guerite.scope=edge` assigns the container to a scope for filtering.
+- `guerite.lifecycle.pre_check=/path/to/script.sh` runs a pre-check hook in the container.
+- `guerite.lifecycle.pre_update=/path/to/script.sh` runs before an update/recreate.
+- `guerite.lifecycle.post_update=/path/to/script.sh` runs after an update/recreate.
+- `guerite.lifecycle.post_check=/path/to/script.sh` runs after each cycle.
 
 ### Dependency ordering
 
@@ -134,6 +148,26 @@ When the health-check schedule matches:
 - If the container is not `healthy` (and not in the grace window), Guerite replaces the container.
 - Health-triggered restarts are rate-limited per container for at least `GUERITE_HEALTH_CHECK_BACKOFF_SECONDS`.
 - Health backoff state is persisted to `GUERITE_STATE_FILE` so restarts don't flap after Guerite itself restarts.
+
+### Lifecycle hooks (optional)
+
+If `GUERITE_LIFECYCLE_HOOKS=true`, Guerite executes lifecycle hooks inside containers when labels are present:
+
+- `guerite.lifecycle.pre_check` runs before update evaluation.
+- `guerite.lifecycle.pre_update` runs before recreate/update.
+- `guerite.lifecycle.post_update` runs after recreate/update.
+- `guerite.lifecycle.post_check` runs after each cycle.
+
+Hook failures are logged and do not stop the update flow.
+
+### HTTP API (optional)
+
+Enable with `GUERITE_HTTP_API=true` to expose:
+
+- `POST /v1/update` to trigger a cycle.
+- `GET /v1/metrics` when `GUERITE_HTTP_API_METRICS=true` for Prometheus-style metrics.
+
+If `GUERITE_HTTP_API_TOKEN` is set, requests must include `Authorization: Bearer <token>`.
 
 ### Replace/Recreate
 

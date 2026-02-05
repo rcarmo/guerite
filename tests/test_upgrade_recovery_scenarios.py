@@ -61,6 +61,32 @@ class TestUpgradeRecoveryScenarios:
             restart_retry_limit=3,
             depends_label="guerite.depends_on",
             action_cooldown_seconds=60,
+            monitor_only=False,
+            no_pull=False,
+            no_restart=False,
+            monitor_only_label="guerite.monitor_only",
+            no_pull_label="guerite.no_pull",
+            no_restart_label="guerite.no_restart",
+            scope_label="guerite.scope",
+            scope=None,
+            include_containers=set(),
+            exclude_containers=set(),
+            rolling_restart=False,
+            stop_timeout_seconds=None,
+            lifecycle_hooks_enabled=False,
+            hook_timeout_seconds=60,
+            pre_check_label="guerite.lifecycle.pre_check",
+            pre_update_label="guerite.lifecycle.pre_update",
+            post_update_label="guerite.lifecycle.post_update",
+            post_check_label="guerite.lifecycle.post_check",
+            pre_update_timeout_label="guerite.lifecycle.pre_update_timeout_seconds",
+            post_update_timeout_label="guerite.lifecycle.post_update_timeout_seconds",
+            http_api_enabled=False,
+            http_api_host="0.0.0.0",
+            http_api_port=8080,
+            http_api_token=None,
+            http_api_metrics=False,
+            run_once=False,
         )
 
         # Execute
@@ -85,6 +111,39 @@ class TestUpgradeRecoveryScenarios:
 
         client = Mock()
         settings = Mock()  # Mock to avoid complex setup
+        settings.scope = None
+        settings.include_containers = set()
+        settings.exclude_containers = set()
+        settings.rolling_restart = False
+        settings.lifecycle_hooks_enabled = False
+        settings.hook_timeout_seconds = 60
+        settings.monitor_only = False
+        settings.no_pull = False
+        settings.no_restart = False
+        settings.monitor_only_label = "guerite.monitor_only"
+        settings.no_pull_label = "guerite.no_pull"
+        settings.no_restart_label = "guerite.no_restart"
+        settings.pre_check_label = "guerite.lifecycle.pre_check"
+        settings.post_check_label = "guerite.lifecycle.post_check"
+        settings.pre_update_label = "guerite.lifecycle.pre_update"
+        settings.post_update_label = "guerite.lifecycle.post_update"
+        settings.pre_update_timeout_label = "guerite.lifecycle.pre_update_timeout_seconds"
+        settings.post_update_timeout_label = "guerite.lifecycle.post_update_timeout_seconds"
+        settings.health_backoff_seconds = 300
+        settings.health_check_timeout_seconds = 60
+        settings.update_label = "guerite.update"
+        settings.restart_label = "guerite.restart"
+        settings.recreate_label = "guerite.recreate"
+        settings.health_label = "guerite.health_check"
+        settings.depends_label = "guerite.depends_on"
+        settings.dry_run = False
+        settings.action_cooldown_seconds = 60
+        settings.state_file = "/tmp/test_state.json"
+        settings.prune_cron = None
+        settings.notifications = set()
+        settings.rollback_grace_seconds = 3600
+        settings.restart_retry_limit = 3
+        settings.stop_timeout_seconds = None
         timestamp = datetime.now(timezone.utc)
 
         # Execute
@@ -109,6 +168,39 @@ class TestUpgradeRecoveryScenarios:
 
         client = Mock()
         settings = Mock()
+        settings.scope = None
+        settings.include_containers = set()
+        settings.exclude_containers = set()
+        settings.rolling_restart = False
+        settings.lifecycle_hooks_enabled = False
+        settings.hook_timeout_seconds = 60
+        settings.monitor_only = False
+        settings.no_pull = False
+        settings.no_restart = False
+        settings.monitor_only_label = "guerite.monitor_only"
+        settings.no_pull_label = "guerite.no_pull"
+        settings.no_restart_label = "guerite.no_restart"
+        settings.pre_check_label = "guerite.lifecycle.pre_check"
+        settings.post_check_label = "guerite.lifecycle.post_check"
+        settings.pre_update_label = "guerite.lifecycle.pre_update"
+        settings.post_update_label = "guerite.lifecycle.post_update"
+        settings.pre_update_timeout_label = "guerite.lifecycle.pre_update_timeout_seconds"
+        settings.post_update_timeout_label = "guerite.lifecycle.post_update_timeout_seconds"
+        settings.health_backoff_seconds = 300
+        settings.health_check_timeout_seconds = 60
+        settings.update_label = "guerite.update"
+        settings.restart_label = "guerite.restart"
+        settings.recreate_label = "guerite.recreate"
+        settings.health_label = "guerite.health_check"
+        settings.depends_label = "guerite.depends_on"
+        settings.dry_run = False
+        settings.action_cooldown_seconds = 60
+        settings.state_file = "/tmp/test_state.json"
+        settings.prune_cron = None
+        settings.notifications = set()
+        settings.rollback_grace_seconds = 3600
+        settings.restart_retry_limit = 3
+        settings.stop_timeout_seconds = None
 
         # Execute
         run_once(client, settings, containers=custom_containers)

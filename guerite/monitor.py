@@ -9,6 +9,7 @@ from logging import getLogger
 from inspect import signature
 from os.path import exists
 from socket import gethostname
+from threading import Event, Lock, Thread
 from typing import Any, Optional
 from time import sleep
 from dataclasses import dataclass
@@ -20,6 +21,8 @@ from docker import DockerClient
 from docker.errors import APIError, DockerException
 from docker.models.containers import Container
 from docker.models.images import Image
+from asyncio import new_event_loop, set_event_loop
+from aiohttp import web
 from requests.exceptions import ReadTimeout, RequestException
 try:
     from urllib3.exceptions import ReadTimeoutError
@@ -47,6 +50,83 @@ _RESTART_BACKOFF: dict[str, datetime] = {}
 _RESTART_FAIL_COUNT: dict[str, int] = {}
 _LAST_ACTION: dict[str, datetime] = {}
 _IN_FLIGHT: set[str] = set()
+_METRICS: dict[str, int] = {
+    "scans_total": 0,
+    "scans_skipped": 0,
+    "containers_scanned": 0,
+    "containers_updated": 0,
+    "containers_failed": 0,
+}
+_METRICS_LOCK = Lock()
+
+
+def _format_metrics(metrics: dict[str, int]) -> str:
+    return "\n".join(
+        [
+            f"guerite_scans_total {metrics['scans_total']}",
+            f"guerite_scans_skipped {metrics['scans_skipped']}",
+            f"guerite_containers_scanned {metrics['containers_scanned']}",
+            f"guerite_containers_updated {metrics['containers_updated']}",
+            f"guerite_containers_failed {metrics['containers_failed']}",
+        ]
+    ) + "\n"
+
+
+class HttpServer:
+    def __init__(
+        self,
+        settings: Settings,
+        wake_signal: Event,
+        trigger_event: Event,
+    ) -> None:
+        self._settings = settings
+        self._wake_signal = wake_signal
+        self._trigger_event = trigger_event
+        self._loop = new_event_loop()
+        self._thread = Thread(target=self._run, daemon=True)
+        self._runner: Optional[web.AppRunner] = None
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def _run(self) -> None:
+        set_event_loop(self._loop)
+        self._loop.run_until_complete(self._start())
+        self._loop.run_forever()
+
+    async def _start(self) -> None:
+        app = web.Application()
+        app.router.add_post("/v1/update", self._handle_update)
+        app.router.add_get("/v1/metrics", self._handle_metrics)
+        self._runner = web.AppRunner(app)
+        await self._runner.setup()
+        site = web.TCPSite(self._runner, self._settings.http_api_host, self._settings.http_api_port)
+        await site.start()
+        LOG.info("HTTP API listening on %s:%s", self._settings.http_api_host, self._settings.http_api_port)
+
+    def _authorize(self, request: web.Request) -> bool:
+        if not self._settings.http_api_token:
+            return True
+        header = request.headers.get("Authorization", "")
+        if not header.startswith("Bearer "):
+            return False
+        token = header.split(" ", 1)[1]
+        return token == self._settings.http_api_token
+
+    async def _handle_update(self, request: web.Request) -> web.Response:
+        if not self._authorize(request):
+            return web.Response(status=401, text="unauthorized")
+        self._trigger_event.set()
+        self._wake_signal.set()
+        return web.Response(status=202, text="scheduled")
+
+    async def _handle_metrics(self, request: web.Request) -> web.Response:
+        if not self._settings.http_api_metrics:
+            return web.Response(status=404, text="metrics disabled")
+        if not self._authorize(request):
+            return web.Response(status=401, text="unauthorized")
+        metrics = _format_metrics(metrics_snapshot())
+        return web.Response(status=200, text=metrics, content_type="text/plain")
 
 
 @dataclass
@@ -255,7 +335,20 @@ def select_monitored_containers(
                 seen[container.id] = container
         except Exception as error:
             LOG.error("Failed to list containers with label %s: %s", label, error)
-    return list(seen.values())
+    filtered = list(seen.values())
+    if settings.scope is not None:
+        filtered = [
+            container
+            for container in filtered
+            if (container.labels or {}).get(settings.scope_label) == settings.scope
+        ]
+    if settings.include_containers:
+        include = {item for item in settings.include_containers if item}
+        filtered = [container for container in filtered if container.name in include]
+    if settings.exclude_containers:
+        exclude = {item for item in settings.exclude_containers if item}
+        filtered = [container for container in filtered if container.name not in exclude]
+    return filtered
 
 
 def pull_image(client: DockerClient, image_ref: str) -> Optional[Image]:
@@ -707,6 +800,35 @@ def _image_display_name(
     return "unknown"
 
 
+def _label_bool(labels: dict, key: str) -> Optional[bool]:
+    if not key:
+        return None
+    raw = labels.get(key)
+    if raw is None:
+        return None
+    lowered = str(raw).strip().lower()
+    if lowered in {"1", "true", "yes", "on"}:
+        return True
+    if lowered in {"0", "false", "no", "off"}:
+        return False
+    return None
+
+
+def _effective_setting(labels: dict, key: str, default: bool) -> bool:
+    override = _label_bool(labels, key)
+    return override if override is not None else default
+
+
+def _resolve_container_modes(container: Container, settings: Settings) -> dict[str, bool]:
+    labels = container.labels or {}
+    monitor_only = _effective_setting(labels, settings.monitor_only_label, settings.monitor_only)
+    no_pull = _effective_setting(labels, settings.no_pull_label, settings.no_pull)
+    no_restart = _effective_setting(labels, settings.no_restart_label, settings.no_restart)
+    if monitor_only:
+        no_restart = True
+    return {"monitor_only": monitor_only, "no_pull": no_pull, "no_restart": no_restart}
+
+
 def _normalize_links_value(raw_links: Optional[Any]) -> Optional[dict[str, str]]:
     if raw_links in (None, False):
         return None
@@ -724,6 +846,58 @@ def _normalize_links_value(raw_links: Optional[Any]) -> Optional[dict[str, str]]
         return result if result else None
     # Unknown shape; skip to avoid docker SDK unpack errors
     return None
+
+
+def _resolve_hook_timeout(
+    container: Container, label_key: str, default_timeout: int
+) -> int:
+    labels = container.labels or {}
+    raw = labels.get(label_key)
+    if raw is None:
+        return default_timeout
+    try:
+        parsed = int(str(raw).strip())
+    except (ValueError, TypeError):
+        return default_timeout
+    return parsed if parsed >= 0 else default_timeout
+
+
+def _run_lifecycle_hook(
+    client: DockerClient,
+    container: Container,
+    hook: str,
+    timeout_seconds: int,
+    event_log: list[str],
+    hook_name: str,
+) -> None:
+    if not hook:
+        return
+    container_id = container.id
+    if not container_id:
+        LOG.warning("Skipping %s hook; missing container id for %s", hook_name, container.name)
+        return
+    try:
+        exec_info = client.api.exec_create(container_id, cmd=["sh", "-c", hook])
+        exec_id = exec_info.get("Id")
+        if exec_id is None:
+            raise DockerException("exec_create returned no Id")
+        client.api.exec_start(
+            exec_id,
+            detach=False,
+            tty=False,
+            stream=False,
+            timeout=timeout_seconds,
+        )
+        result = client.api.exec_inspect(exec_id)
+        exit_code = result.get("ExitCode")
+        if exit_code not in (0, 75):
+            LOG.warning(
+                "%s hook failed for %s with exit code %s", hook_name, container.name, exit_code
+            )
+            event_log.append(f"{hook_name} hook failed for {container.name} (exit {exit_code})")
+    except (DockerException, APIError) as error:
+        LOG.warning("%s hook failed for %s: %s", hook_name, container.name, error)
+        event_log.append(f"{hook_name} hook failed for {container.name}: {error}")
 
 
 def _action_allowed(base_name: str, now: datetime, settings: Settings) -> bool:
@@ -753,6 +927,16 @@ def _strip_guerite_suffix(name: str) -> str:
         if match is None:
             return current
         current = match.group(1)
+
+
+def _metric_increment(name: str, amount: int = 1) -> None:
+    with _METRICS_LOCK:
+        _METRICS[name] = _METRICS.get(name, 0) + amount
+
+
+def metrics_snapshot() -> dict[str, int]:
+    with _METRICS_LOCK:
+        return dict(_METRICS)
 
 
 def _parse_recovery_info_from_name(name: str) -> Optional[dict[str, Any]]:
@@ -1439,6 +1623,10 @@ def restart_container(
     event_log: list[str],
     notify: bool,
     is_upgrade: bool = False,
+    pre_update_hook: Optional[str] = None,
+    post_update_hook: Optional[str] = None,
+    pre_update_timeout: Optional[int] = None,
+    post_update_timeout: Optional[int] = None,
 ) -> bool:
     """Enhanced container recreation with comprehensive fallback."""
     state = ContainerRecreateState()
@@ -1489,6 +1677,16 @@ def restart_container(
     _preflight_mounts(name, mounts, notify, event_log)
 
     try:
+        if pre_update_hook:
+            _run_lifecycle_hook(
+                client,
+                container,
+                pre_update_hook,
+                pre_update_timeout or settings.hook_timeout_seconds,
+                event_log,
+                "pre-update",
+            )
+
         # Step 1: Rename old container
         client.api.rename(container.id, state.temp_old_name)
         state.old_renamed = True
@@ -1520,7 +1718,10 @@ def restart_container(
             )
 
         try:
-            container.stop()
+            if settings.stop_timeout_seconds is not None:
+                container.stop(timeout=settings.stop_timeout_seconds)
+            else:
+                container.stop()
             state.old_stopped = True
         except DockerException as e:
             LOG.warning(
@@ -1596,6 +1797,16 @@ def restart_container(
         if container.id:
             _RESTART_FAIL_COUNT.pop(container.id, None)
             _RESTART_BACKOFF.pop(container.id, None)
+
+        if post_update_hook:
+            _run_lifecycle_hook(
+                client,
+                container,
+                post_update_hook,
+                post_update_timeout or settings.hook_timeout_seconds,
+                event_log,
+                "post-update",
+            )
 
         # Step 10: Complete upgrade tracking if this was an upgrade
         if is_upgrade and upgrade_state and container.id:
@@ -1815,6 +2026,7 @@ def run_once(
     _ensure_upgrade_state_loaded(settings.state_file)
     _ensure_known_containers_loaded(settings.state_file)
     current_time = timestamp or now_utc()
+    _metric_increment("scans_total")
 
     # Check for stalled upgrades first
     try:
@@ -1840,6 +2052,10 @@ def run_once(
     _track_new_containers(monitored)
     event_log: list[str] = []
     hostname = gethostname()
+    _metric_increment("containers_scanned", len(monitored))
+    rolling_seen: set[Optional[str]] = set()
+    if not monitored:
+        _metric_increment("scans_skipped")
     base_map = {_base_name(container): container for container in monitored}
     try:
         _reconcile_failed_upgrades(
@@ -1852,6 +2068,15 @@ def run_once(
     except Exception as error:
         LOG.warning("Failed to reconcile failed upgrades: %s", error)
     for container in monitored:
+        if settings.rolling_restart:
+            project = _compose_project(container)
+            if project in rolling_seen:
+                LOG.debug(
+                    "Skipping %s; rolling restart already performed for %s",
+                    container.name,
+                    project,
+                )
+                continue
         deps = _label_dependencies(container, settings) | _link_targets(container)
         deps = {dep for dep in deps if dep in base_map}
         skip_container = False
@@ -1922,12 +2147,35 @@ def run_once(
         if image_ref is None:
             LOG.warning("Skipping %s; missing image reference", container.name)
             continue
+        mode = _resolve_container_modes(container, settings)
+        labels = container.labels or {}
+        pre_check = labels.get(settings.pre_check_label)
+        post_check = labels.get(settings.post_check_label)
+        pre_update = labels.get(settings.pre_update_label)
+        post_update = labels.get(settings.post_update_label)
+        pre_update_timeout = _resolve_hook_timeout(
+            container, settings.pre_update_timeout_label, settings.hook_timeout_seconds
+        )
+        post_update_timeout = _resolve_hook_timeout(
+            container, settings.post_update_timeout_label, settings.hook_timeout_seconds
+        )
+        if settings.lifecycle_hooks_enabled and pre_check:
+            _run_lifecycle_hook(
+                client,
+                container,
+                pre_check,
+                settings.hook_timeout_seconds,
+                event_log,
+                "pre-check",
+            )
 
         update_executed = False
         if update_due:
             notify_update = _should_notify(settings, "update")
             old_image_id = current_image_id(container)
-            pulled_image = pull_image(client, image_ref)
+            pulled_image = (
+                None if mode["no_pull"] else pull_image(client, image_ref)
+            )
             if pulled_image is not None and needs_update(container, pulled_image):
                 LOG.info("Updating %s with image %s", container.name, image_ref)
                 _mark_action(base_name, current_time)
@@ -1935,6 +2183,12 @@ def run_once(
                     event_log.append(f"Found new {image_ref} image")
                 if settings.dry_run:
                     LOG.info("Dry-run enabled; not restarting %s", container.name)
+                elif mode["no_restart"]:
+                    LOG.info("No-restart enabled; not recreating %s", container.name)
+                    if notify_update:
+                        event_log.append(
+                            f"Update available for {container.name} but no-restart enabled"
+                        )
                 else:
                     if _supports_is_upgrade(restart_container):
                         ok = restart_container(
@@ -1946,6 +2200,10 @@ def run_once(
                             event_log,
                             notify_update,
                             is_upgrade=True,
+                            pre_update_hook=pre_update if settings.lifecycle_hooks_enabled else None,
+                            post_update_hook=post_update if settings.lifecycle_hooks_enabled else None,
+                            pre_update_timeout=pre_update_timeout,
+                            post_update_timeout=post_update_timeout,
                         )
                     else:
                         ok = restart_container(
@@ -1956,6 +2214,10 @@ def run_once(
                             settings,
                             event_log,
                             notify_update,
+                            pre_update_hook=pre_update if settings.lifecycle_hooks_enabled else None,
+                            post_update_hook=post_update if settings.lifecycle_hooks_enabled else None,
+                            pre_update_timeout=pre_update_timeout,
+                            post_update_timeout=post_update_timeout,
                         )
                     if ok:
                         remove_old_image(
@@ -1966,10 +2228,18 @@ def run_once(
                             notify_update,
                         )
                         update_executed = True
+                        _metric_increment("containers_updated")
+                        if settings.rolling_restart:
+                            rolling_seen.add(_compose_project(container))
+                    else:
+                        _metric_increment("containers_failed")
             elif pulled_image is not None:
                 LOG.debug("%s is up-to-date", container.name)
+            elif mode["no_pull"]:
+                LOG.info("No-pull enabled; skipping update check for %s", container.name)
             elif notify_update:
                 event_log.append(f"Failed to pull {image_ref} for {container.name}")
+                _metric_increment("containers_failed")
             if update_executed:
                 continue
 
@@ -1999,6 +2269,9 @@ def run_once(
             if settings.dry_run:
                 LOG.info("Dry-run enabled; not recreating %s", container.name)
                 continue
+            if mode["no_restart"]:
+                LOG.info("No-restart enabled; not recreating %s", container.name)
+                continue
             notify_recreate = _should_notify(settings, "recreate")
             image_id = current_image_id(container)
             if notify_recreate:
@@ -2013,8 +2286,16 @@ def run_once(
                 settings,
                 event_log,
                 notify_recreate,
+                pre_update_hook=pre_update if settings.lifecycle_hooks_enabled else None,
+                post_update_hook=post_update if settings.lifecycle_hooks_enabled else None,
+                pre_update_timeout=pre_update_timeout,
+                post_update_timeout=post_update_timeout,
             ):
-                pass
+                _metric_increment("containers_updated")
+                if settings.rolling_restart:
+                    rolling_seen.add(_compose_project(container))
+            else:
+                _metric_increment("containers_failed")
             continue
 
         if unhealthy_now and not _health_allowed(
@@ -2030,6 +2311,9 @@ def run_once(
             if settings.dry_run:
                 LOG.info("Dry-run enabled; not restarting %s", container.name)
                 continue
+            if mode["no_restart"]:
+                LOG.info("No-restart enabled; not restarting %s", container.name)
+                continue
             notify_restart = _should_notify(settings, "restart")
             image_id = current_image_id(container)
             try:
@@ -2038,10 +2322,14 @@ def run_once(
                     event_log.append(
                         f"Restarted {container.name} (scheduled restart) ({_image_display_name(image_ref=image_ref)})"
                     )
+                _metric_increment("containers_updated")
+                if settings.rolling_restart:
+                    rolling_seen.add(_compose_project(container))
             except DockerException as error:
                 LOG.error("Failed to restart %s: %s", container.name, error)
                 if notify_restart:
                     event_log.append(f"Failed to restart {container.name}: {error}")
+                _metric_increment("containers_failed")
                 _register_restart_failure(
                     container.id,
                     container.name,
@@ -2076,6 +2364,9 @@ def run_once(
             if settings.dry_run:
                 LOG.info("Dry-run enabled; not restarting %s", container.name)
                 continue
+            if mode["no_restart"]:
+                LOG.info("No-restart enabled; not restarting %s", container.name)
+                continue
             notify_event = _should_notify(settings, "health") or _should_notify(
                 settings, "health_check"
             )
@@ -2088,6 +2379,10 @@ def run_once(
                 settings,
                 event_log,
                 notify_event,
+                pre_update_hook=pre_update if settings.lifecycle_hooks_enabled else None,
+                post_update_hook=post_update if settings.lifecycle_hooks_enabled else None,
+                pre_update_timeout=pre_update_timeout,
+                post_update_timeout=post_update_timeout,
             ):
                 _HEALTH_BACKOFF[container.id] = current_time + timedelta(
                     seconds=settings.health_backoff_seconds
@@ -2099,8 +2394,22 @@ def run_once(
                     event_log.append(
                         f"Restarted {container.name} after failed health check ({_image_display_name(image_ref=image_ref)})"
                     )
+                _metric_increment("containers_updated")
+                if settings.rolling_restart:
+                    rolling_seen.add(_compose_project(container))
             elif notify_event:
                 event_log.append(f"Failed to restart {container.name}")
+                _metric_increment("containers_failed")
+
+        if settings.lifecycle_hooks_enabled and post_check:
+            _run_lifecycle_hook(
+                client,
+                container,
+                post_check,
+                settings.hook_timeout_seconds,
+                event_log,
+                "post-check",
+            )
 
     if prune_due:
         notify_prune = _should_notify(settings, "prune")
