@@ -73,7 +73,7 @@ def build_client_with_retry(settings: Settings) -> DockerClient:
             last_error = error
             if attempt == retries:
                 break
-            delay = backoff * (attempt + 1)
+            delay = min(backoff * (2 ** attempt), 300)  # Exponential backoff, max 5 min
             LOG.warning("Unable to connect to Docker (attempt %s/%s): %s; retrying in %ss", attempt + 1, retries + 1, error, delay)
             sleep(delay)
             attempt += 1
@@ -107,8 +107,11 @@ def is_monitored_event(event: dict, settings: Settings) -> bool:
 
 def start_event_listener(client: DockerClient, settings: Settings, wake_signal: Event) -> None:
     def _run() -> None:
+        backoff_seconds = 5
+        max_backoff = 60
         while True:
             try:
+                backoff_seconds = 5  # Reset on successful connection
                 for event in client.events(decode=True):
                     if not isinstance(event, dict):
                         continue
@@ -130,8 +133,9 @@ def start_event_listener(client: DockerClient, settings: Settings, wake_signal: 
                     LOG.info("Docker event %s for %s (%s); waking up", action, display, short_id)
                     wake_signal.set()
             except DockerException as error:
-                LOG.warning("Event stream error: %s", error)
-                sleep(5)
+                LOG.warning("Event stream error: %s; retrying in %ss", error, backoff_seconds)
+                sleep(backoff_seconds)
+                backoff_seconds = min(backoff_seconds * 2, max_backoff)
 
     thread = Thread(target=_run, daemon=True)
     thread.start()

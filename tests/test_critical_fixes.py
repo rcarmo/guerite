@@ -171,10 +171,10 @@ class TestMostImportantFunctionPaths:
             settings = load_settings()
             assert settings.health_check_timeout_seconds == 999999
 
-        # Test zero values for optional settings
+        # Test zero values for optional settings - 0 is now allowed
         with patch.dict(os.environ, {"GUERITE_PRUNE_TIMEOUT_SECONDS": "0"}):
             settings = load_settings()
-            assert settings.prune_timeout_seconds == 180  # Uses default for zero
+            assert settings.prune_timeout_seconds == 0  # 0 is now valid
 
         # Test negative values for required settings
         with patch.dict(os.environ, {"GUERITE_RESTART_RETRY_LIMIT": "-5"}):

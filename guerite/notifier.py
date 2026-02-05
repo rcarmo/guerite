@@ -17,7 +17,7 @@ def notify_pushover(settings: Settings, title: str, message: str) -> None:
         return
 
     endpoint = urlsplit(settings.pushover_api)
-    connection = HTTPSConnection(endpoint.netloc, timeout=_NOTIFICATION_TIMEOUT)
+    connection = None
     body = urlencode(
         {
             "token": settings.pushover_token,
@@ -31,6 +31,7 @@ def notify_pushover(settings: Settings, title: str, message: str) -> None:
         path = f"{path}?{endpoint.query}"
 
     try:
+        connection = HTTPSConnection(endpoint.netloc, timeout=_NOTIFICATION_TIMEOUT)
         connection.request(
             "POST", path, body=body, headers={"Content-Type": "application/x-www-form-urlencoded"}
         )
@@ -40,7 +41,8 @@ def notify_pushover(settings: Settings, title: str, message: str) -> None:
     except OSError as error:
         LOG.warning("Failed to send Pushover notification: %s", error)
     finally:
-        connection.close()
+        if connection is not None:
+            connection.close()
 
 
 def notify_webhook(settings: Settings, title: str, message: str) -> None:
@@ -49,17 +51,17 @@ def notify_webhook(settings: Settings, title: str, message: str) -> None:
         return
 
     endpoint = urlsplit(settings.webhook_url)
-    if endpoint.scheme == "https":
-        connection = HTTPSConnection(endpoint.netloc, timeout=_NOTIFICATION_TIMEOUT)
-    else:
-        connection = HTTPConnection(endpoint.netloc, timeout=_NOTIFICATION_TIMEOUT)
-
+    connection = None
     body = dumps({"title": title, "message": message}).encode("utf-8")
     path = endpoint.path or "/"
     if endpoint.query:
         path = f"{path}?{endpoint.query}"
 
     try:
+        if endpoint.scheme == "https":
+            connection = HTTPSConnection(endpoint.netloc, timeout=_NOTIFICATION_TIMEOUT)
+        else:
+            connection = HTTPConnection(endpoint.netloc, timeout=_NOTIFICATION_TIMEOUT)
         connection.request(
             "POST", path, body=body, headers={"Content-Type": "application/json"}
         )
@@ -69,4 +71,5 @@ def notify_webhook(settings: Settings, title: str, message: str) -> None:
     except OSError as error:
         LOG.warning("Failed to send webhook notification: %s", error)
     finally:
-        connection.close()
+        if connection is not None:
+            connection.close()

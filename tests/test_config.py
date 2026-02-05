@@ -75,7 +75,7 @@ def test_load_settings_prune_timeout_defaults_to_180(monkeypatch):
 @pytest.mark.parametrize("env_value,expected", [
     ("300", 300),
     ("not-an-int", 180),
-    ("0", 180),
+    ("0", 0),  # 0 is now allowed (means no/default timeout)
 ])
 def test_load_settings_prune_timeout_values(monkeypatch, env_value, expected):
     monkeypatch.setenv("DOCKER_HOST", "unix://test")

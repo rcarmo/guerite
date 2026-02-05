@@ -40,6 +40,7 @@ LOG = getLogger(__name__)
 
 # Global state with thread-safe access via _STATE_LOCK
 _STATE_LOCK = Lock()
+_PRUNE_LOCK = Lock()  # Lock for Docker API timeout manipulation during prune
 _HEALTH_BACKOFF: dict[str, datetime] = {}
 _HEALTH_BACKOFF_LOADED = False
 _NO_HEALTH_WARNED: set[str] = set()
@@ -382,10 +383,13 @@ def pull_image(client: DockerClient, image_ref: str) -> Optional[Image]:
         LOG.error("Failed to pull image %s: %s", image_ref, error)
         return None
     except Exception as error:
+        # Handle urllib3 ReadTimeoutError which may not be importable
         if ReadTimeoutError is not None and isinstance(error, ReadTimeoutError):
             LOG.error("Failed to pull image %s: %s", image_ref, error)
             return None
-        raise
+        # Log and continue for any other unexpected error to avoid crashing
+        LOG.error("Unexpected error pulling image %s: %s", image_ref, error)
+        return None
 
 
 def _supports_is_upgrade(func: Any) -> bool:
@@ -1953,27 +1957,28 @@ def prune_images(
             )
         return
     try:
-        had_timeout_attr = hasattr(client.api, "timeout")
-        previous_timeout: Any = getattr(client.api, "timeout", None)
+        with _PRUNE_LOCK:
+            had_timeout_attr = hasattr(client.api, "timeout")
+            previous_timeout: Any = getattr(client.api, "timeout", None)
 
-        if (
-            settings.prune_timeout_seconds is not None
-            and settings.prune_timeout_seconds > 0
-        ):
-            client.api.timeout = settings.prune_timeout_seconds
-        elif isinstance(previous_timeout, (int, float)) and previous_timeout > 0:
-            client.api.timeout = previous_timeout * 3
-        else:
-            client.api.timeout = 180
-
-        try:
-            result = client.api.prune_images(filters={"dangling": False})
-        finally:
-            if had_timeout_attr:
-                client.api.timeout = previous_timeout
+            if (
+                settings.prune_timeout_seconds is not None
+                and settings.prune_timeout_seconds > 0
+            ):
+                client.api.timeout = settings.prune_timeout_seconds
+            elif isinstance(previous_timeout, (int, float)) and previous_timeout > 0:
+                client.api.timeout = previous_timeout * 3
             else:
-                if hasattr(client.api, "timeout"):
-                    delattr(client.api, "timeout")
+                client.api.timeout = 180
+
+            try:
+                result = client.api.prune_images(filters={"dangling": False})
+            finally:
+                if had_timeout_attr:
+                    client.api.timeout = previous_timeout
+                else:
+                    if hasattr(client.api, "timeout"):
+                        delattr(client.api, "timeout")
         reclaimed = result.get("SpaceReclaimed") if isinstance(result, dict) else None
         images_deleted = (
             result.get("ImagesDeleted") if isinstance(result, dict) else None

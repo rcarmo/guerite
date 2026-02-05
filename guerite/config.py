@@ -244,7 +244,7 @@ def _env_int_optional(name: str, default: Optional[int]) -> Optional[int]:
         parsed = int(value)
     except ValueError:
         return default
-    return parsed if parsed > 0 else default
+    return parsed if parsed >= 0 else default
 
 
 def _env_csv_set(name: str, default: str) -> Set[str]:
@@ -252,7 +252,7 @@ def _env_csv_set(name: str, default: str) -> Set[str]:
     items = raw.split(",") if raw else []
     normalized = {item.strip().lower() for item in items if item.strip()}
     if not normalized:
-        return {default}
+        return {default} if default else set()
     if "all" in normalized:
         return set(ALL_NOTIFICATION_EVENTS)
     return normalized
