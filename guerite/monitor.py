@@ -592,12 +592,13 @@ def _notify_restart_backoff(
     settings: Settings,
 ) -> None:
     key = f"{container_id}-backoff-notified"
-    if key in _HEALTH_BACKOFF:
-        return
+    with _STATE_LOCK:
+        if key in _HEALTH_BACKOFF:
+            return
+        _HEALTH_BACKOFF[key] = backoff_until
     event_log.append(
         f"Recreate for {container_name} deferred until {backoff_until.isoformat()} after repeated failures"
     )
-    _HEALTH_BACKOFF[key] = backoff_until
 
 
 def _filter_rollback_containers(containers: list[Container]) -> list[Container]:
@@ -1977,6 +1978,7 @@ def prune_images(
             )
         return
     try:
+        result: Optional[dict[str, Any]] = None
         with _PRUNE_LOCK:
             had_timeout_attr = hasattr(client.api, "timeout")
             previous_timeout: Any = getattr(client.api, "timeout", None)

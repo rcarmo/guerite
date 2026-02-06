@@ -145,6 +145,8 @@ def start_event_listener(
             except DockerException as error:
                 LOG.warning("Event stream error: %s; retrying in %ss", error, backoff_seconds)
                 if client is None:
+                    if event_client is not None:
+                        event_client.close()
                     event_client = None  # Force reconnection on next iteration (only if we created it)
                 sleep(backoff_seconds)
                 backoff_seconds = min(backoff_seconds * 2, max_backoff)
