@@ -1,6 +1,6 @@
 [project]
 name = "guerite"
-version = "1.0.12"
+version = "1.0.13"
 description = "Minimal Docker container watcher and restarter"
 authors = [{ name = "Guerite" }]
 requires-python = ">=3.9"
