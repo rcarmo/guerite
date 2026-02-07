@@ -343,9 +343,28 @@ jobs:
               const untaggedVersions = versions.filter(v => !v.metadata?.container?.tags || v.metadata.container.tags.length === 0);
               
               core.info(`Tagged versions: ${taggedVersions.length}, Untagged versions: ${untaggedVersions.length}`);
-              
-              // Delete all untagged versions
-              for (const version of untaggedVersions) {
+
+              // Sort tagged versions by creation date (newest first)
+              const sortedTagged = taggedVersions.sort((a, b) => 
+                new Date(b.created_at) - new Date(a.created_at)
+              );
+
+              // Keep the newest tagged versions, delete the rest
+              const taggedToDelete = sortedTagged.slice(keepCount);
+
+              // Find the cutoff date: the oldest kept tagged version.
+              // Untagged versions newer than this are per-architecture
+              // images referenced by kept multi-arch manifests.
+              const oldestKept = sortedTagged.length > 0
+                ? new Date(sortedTagged[Math.min(keepCount, sortedTagged.length) - 1].created_at)
+                : new Date();
+              core.info(`Oldest kept tag created at: ${oldestKept.toISOString()}`);
+
+              const untaggedToDelete = untaggedVersions.filter(v =>
+                new Date(v.created_at) < oldestKept
+              );
+              core.info(`Untagged versions to delete: ${untaggedToDelete.length} (keeping ${untaggedVersions.length - untaggedToDelete.length} that may be referenced by kept tags)`);
+              for (const version of untaggedToDelete) {
                 core.info(`Deleting untagged version ${version.id} (created: ${version.created_at})`);
                 try {
                   await deleteVersion({
@@ -359,16 +378,8 @@ jobs:
                 }
               }
               
-              // Sort tagged versions by creation date (newest first)
-              const sortedTagged = taggedVersions.sort((a, b) => 
-                new Date(b.created_at) - new Date(a.created_at)
-              );
-              
-              // Keep the newest versions, delete the rest
-              const versionsToDelete = sortedTagged.slice(keepCount);
-              
-              core.info(`Keeping ${keepCount} newest tagged versions, deleting ${versionsToDelete.length} older ones...`);
-              for (const version of versionsToDelete) {
+              core.info(`Keeping ${keepCount} newest tagged versions, deleting ${taggedToDelete.length} older ones...`);
+              for (const version of taggedToDelete) {
                 const tags = version.metadata?.container?.tags?.join(', ') || 'unknown';
                 core.info(`Deleting version ${version.id} with tags: ${tags} (created: ${version.created_at})`);
                 try {
