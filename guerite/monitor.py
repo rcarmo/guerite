@@ -55,6 +55,7 @@ _LAST_DETECT_NOTIFY: Optional[datetime] = None
 _GUERITE_CREATED: set[str] = set()
 _RESTART_BACKOFF: dict[str, datetime] = {}
 _RESTART_FAIL_COUNT: dict[str, int] = {}
+_BACKOFF_NOTIFIED: set[str] = set()
 _LAST_ACTION: dict[str, datetime] = {}
 _IN_FLIGHT: set[str] = set()
 _METRICS: dict[str, int] = {
@@ -569,7 +570,11 @@ def _restart_allowed(
     container_id: str, base_name: str, now: datetime, settings: Settings
 ) -> bool:
     with _STATE_LOCK:
-        next_time = _RESTART_BACKOFF.get(container_id)
+        next_time = None
+        for key in (container_id, base_name):
+            candidate = _RESTART_BACKOFF.get(key)
+            if candidate is not None and (next_time is None or candidate > next_time):
+                next_time = candidate
     if next_time is None:
         return True
     if now >= next_time:
@@ -591,11 +596,11 @@ def _notify_restart_backoff(
     event_log: list[str],
     settings: Settings,
 ) -> None:
-    key = f"{container_id}-backoff-notified"
+    key = f"{container_id}-backoff"
     with _STATE_LOCK:
-        if key in _HEALTH_BACKOFF:
+        if key in _BACKOFF_NOTIFIED:
             return
-        _HEALTH_BACKOFF[key] = backoff_until
+        _BACKOFF_NOTIFIED.add(key)
     event_log.append(
         f"Recreate for {container_name} deferred until {backoff_until.isoformat()} after repeated failures"
     )
@@ -605,7 +610,7 @@ def _filter_rollback_containers(containers: list[Container]) -> list[Container]:
     rollback: list[Container] = []
     for container in containers:
         name = container.name or ""
-        if "-guerite-old-" in name or "-guerite-new-" in name:
+        if "-guerite-old-" in name or "-guerite-new-" in name or "-guerite-failed-" in name:
             rollback.append(container)
     return rollback
 
@@ -635,6 +640,8 @@ def _wait_for_healthy(
             lowered = status.lower()
             if lowered == "healthy":
                 return True, lowered
+            if lowered == "unhealthy":
+                return False, lowered
             if lowered == "starting":
                 sleep(2)
                 continue
@@ -655,8 +662,11 @@ def _register_restart_failure(
     error: Exception,
 ) -> None:
     with _STATE_LOCK:
-        fail_count = _RESTART_FAIL_COUNT.get(container_id, 0) + 1
-        _RESTART_FAIL_COUNT[container_id] = fail_count
+        fail_key = original_name or container_id
+        fail_count = _RESTART_FAIL_COUNT.get(fail_key, 0) + 1
+        for key in {container_id, original_name}:
+            if key:
+                _RESTART_FAIL_COUNT[key] = fail_count
     backoff_seconds = min(settings.health_backoff_seconds * max(1, fail_count), 3600)
     if fail_count >= settings.restart_retry_limit:
         backoff_seconds = max(
@@ -670,7 +680,9 @@ def _register_restart_failure(
         )
     backoff_until = now_utc() + timedelta(seconds=backoff_seconds)
     with _STATE_LOCK:
-        _RESTART_BACKOFF[container_id] = backoff_until
+        for key in {container_id, original_name}:
+            if key:
+                _RESTART_BACKOFF[key] = backoff_until
     if notify:
         event_log.append(f"Failed to restart {original_name}: {error}")
         _notify_restart_backoff(
@@ -700,9 +712,6 @@ def _cleanup_stale_rollbacks(
             LOG.debug("Could not read state for %s: %s", name, error)
             remaining.append(container)
             continue
-        if running:
-            remaining.append(container)
-            continue
         created_raw = container.attrs.get("Created")
         created_at: Optional[datetime] = None
         if isinstance(created_raw, str):
@@ -724,9 +733,12 @@ def _cleanup_stale_rollbacks(
         try:
             container.remove(force=True)
             if notify:
-                event_log.append(f"Removed stale rollback container {name}")
+                event_log.append(
+                    f"Removed stale {'running ' if running else ''}rollback container {name}".strip()
+                )
             LOG.info(
-                "Removed stale rollback container %s after %.0fs",
+                "Removed stale %srollback container %s after %.0fs",
+                "running " if running else "",
                 name,
                 age if age is not None else 0,
             )
@@ -975,13 +987,12 @@ def _clear_in_flight(base_name: str) -> None:
 
 
 def _strip_guerite_suffix(name: str) -> str:
-    pattern = re_compile(r"^(.*)-guerite-(?:old|new)-[0-9a-f]{8}$")
     current = name
     while True:
-        match = pattern.match(current)
-        if match is None:
+        parsed = _parse_recovery_info_from_name(current)
+        if not parsed:
             return current
-        current = match.group(1)
+        current = parsed["base_name"]
 
 
 def _metric_increment(name: str, amount: int = 1) -> None:
@@ -1006,7 +1017,7 @@ def _parse_recovery_info_from_name(name: str) -> Optional[dict[str, Any]]:
 
     # Extended format with timestamp and fail_count
     extended_pattern = re_compile(
-        r"^(?P<base>.+)-guerite-(?P<kind>old|new)-(?P<suffix>[^-]+)-(?P<ts>\d+)-(?P<count>\d+)$"
+        r"^(?P<base>.+)-guerite-(?P<kind>old|new|failed)-(?P<suffix>[^-]+)-(?P<ts>\d+)-(?P<count>\d+)$"
     )
     match = extended_pattern.match(name)
     if match:
@@ -1023,7 +1034,7 @@ def _parse_recovery_info_from_name(name: str) -> Optional[dict[str, Any]]:
 
     # Simple format without timestamp/fail_count
     simple_pattern = re_compile(
-        r"^(?P<base>.+)-guerite-(?P<kind>old|new)-(?P<suffix>[^-]+)$"
+        r"^(?P<base>.+)-guerite-(?P<kind>old|new|failed)-(?P<suffix>[^-]+)$"
     )
     match = simple_pattern.match(name)
     if match:
@@ -1264,9 +1275,17 @@ def _find_containers_with_upgrade_status(
 def _recover_stalled_upgrades(
     client: DockerClient, settings: Settings, event_log: list[str], notify: bool
 ) -> None:
-    """Recover from stalled upgrades by checking tracked upgrade state."""
+    """Recover from stalled upgrades by checking tracked upgrade state.
+
+    For stalled in-progress upgrades, attempts to rollback by finding
+    containers with guerite temp names and restoring them. If rollback
+    succeeds, the upgrade is marked failed so it will be retried on the
+    next matching cron window.
+    """
     if not _UPGRADE_STATE:
         return
+
+    _recover_orphaned_temp_containers(client, settings, event_log, notify)
 
     now = now_utc()
     stall_threshold = getattr(settings, "upgrade_stall_timeout_seconds", 1800)
@@ -1283,30 +1302,43 @@ def _recover_stalled_upgrades(
             stalled_containers.append((container_id, upgrade_state, age_seconds))
 
     for container_id, upgrade_state, age_seconds in stalled_containers:
+        base_name = upgrade_state.base_name or _short_id(container_id)
         try:
             container = client.containers.get(container_id)
-            base_name = _strip_guerite_suffix(container.name or "unknown")
+            base_name = _strip_guerite_suffix(container.name or base_name)
+        except Exception:
+            pass
 
-            LOG.warning(
-                "Detected stalled upgrade for %s (in-progress for %.0fs)",
-                base_name,
-                age_seconds,
-            )
+        LOG.warning(
+            "Detected stalled upgrade for %s (in-progress for %.0fs); attempting rollback",
+            base_name,
+            age_seconds,
+        )
 
+        # Attempt to find and rollback temp containers
+        rollback_ok = _attempt_stalled_rollback(client, base_name, event_log, notify)
+
+        upgrade_state.status = "failed"
+        _track_upgrade_state(
+            container_id,
+            upgrade_state,
+            state_file=getattr(settings, "state_file", None),
+        )
+
+        if rollback_ok:
+            LOG.info("Rollback completed for stalled upgrade of %s", base_name)
             if notify:
                 event_log.append(
-                    f"Detected stalled upgrade for {base_name}; marking as failed"
+                    f"Rolled back stalled upgrade for {base_name}"
                 )
-
-            # Mark as failed
-            upgrade_state.status = "failed"
-            _track_upgrade_state(
-                container_id,
-                upgrade_state,
-                state_file=getattr(settings, "state_file", None),
-            )
-
-            # Log for manual intervention
+            # Clear backoff so the upgrade will be retried on next cron match
+            with _STATE_LOCK:
+                for key in {container_id, base_name}:
+                    if key:
+                        _RESTART_BACKOFF.pop(key, None)
+                        _RESTART_FAIL_COUNT.pop(key, None)
+            _clear_tracked_upgrade_state(container_id)
+        else:
             LOG.error(
                 "Upgrade stalled for %s - manual intervention may be required. "
                 "Original image: %s, Target image: %s",
@@ -1314,15 +1346,143 @@ def _recover_stalled_upgrades(
                 upgrade_state.original_image_id,
                 upgrade_state.target_image_id,
             )
+            if notify:
+                event_log.append(
+                    f"Stalled upgrade for {base_name} could not be rolled back; manual intervention required"
+                )
 
-        except Exception as error:
-            LOG.warning(
-                "Failed to check stalled upgrade container %s: %s",
-                _short_id(container_id),
-                error,
-            )
-            # If container cannot be inspected, clear state to avoid repeat noise
-            _clear_tracked_upgrade_state(container_id)
+
+def _attempt_stalled_rollback(
+    client: DockerClient, base_name: str, event_log: list[str], notify: bool
+) -> bool:
+    """Attempt to rollback a stalled upgrade by finding temp-named containers.
+
+    Looks for containers named <base>-guerite-old-* and <base>-guerite-new-*,
+    removes the new one, and renames/starts the old one back to production name.
+    Returns True if rollback succeeded or no temp containers found.
+    """
+    try:
+        all_containers = client.containers.list(all=True)
+    except DockerException as error:
+        LOG.warning("Could not list containers for stalled rollback: %s", error)
+        return False
+
+    old_containers = []
+    new_containers = []
+    production_exists = False
+    for container in all_containers:
+        name = container.name or ""
+        if name == base_name:
+            production_exists = True
+        parsed = _parse_recovery_info_from_name(name)
+        if parsed and parsed["base_name"] == base_name:
+            if parsed["recovery_type"] == "old":
+                old_containers.append(container)
+            elif parsed["recovery_type"] == "new":
+                new_containers.append(container)
+
+    # No temp containers found — nothing to rollback
+    if not old_containers and not new_containers:
+        return True
+
+    # If no old container exists and production name is missing, promote new instead
+    if not old_containers and not production_exists and new_containers:
+        promoted = _promote_temp_container(
+            client, new_containers[0], base_name, event_log, notify, "new"
+        )
+        return promoted
+
+    # Remove new containers first to free up names
+    for container in new_containers:
+        try:
+            client.api.remove_container(container.id, force=True)
+            LOG.info("Removed stalled new container %s", container.name)
+        except DockerException as error:
+            LOG.warning("Could not remove stalled new container %s: %s", container.name, error)
+            return False
+
+    # Restore old container to production name if production name is now free
+    if old_containers and not production_exists:
+        old_container = old_containers[0]
+        return _promote_temp_container(
+            client, old_container, base_name, event_log, notify, "old"
+        )
+
+    return True
+
+
+def _promote_temp_container(
+    client: DockerClient,
+    container: Container,
+    base_name: str,
+    event_log: list[str],
+    notify: bool,
+    source: str,
+) -> bool:
+    try:
+        client.api.rename(container.id, base_name)
+        LOG.info("Promoted %s container %s to %s", source, container.name, base_name)
+        try:
+            client.api.start(container.id)
+        except DockerException:
+            pass
+        if notify:
+            event_log.append(f"Promoted {source} container {container.name} to {base_name}")
+        return True
+    except DockerException as error:
+        LOG.warning(
+            "Could not promote %s container %s to %s: %s",
+            source,
+            container.name,
+            base_name,
+            error,
+        )
+        return False
+
+
+def _recover_orphaned_temp_containers(
+    client: DockerClient, settings: Settings, event_log: list[str], notify: bool
+) -> None:
+    """Find running containers with guerite temp names whose base container
+    doesn't exist, and restore them to their production name.
+
+    This handles the case where a rollback failed and the old container is
+    still running under a temp name with no production-named container.
+    """
+    try:
+        all_containers = client.containers.list(all=True)
+    except DockerException:
+        return
+
+    names = {container.name for container in all_containers if container.name}
+    bases_with_old: set[str] = set()
+    for container in all_containers:
+        parsed = _parse_recovery_info_from_name(container.name or "")
+        if parsed and parsed["recovery_type"] == "old":
+            bases_with_old.add(parsed["base_name"])
+    for container in all_containers:
+        name = container.name or ""
+        parsed = _parse_recovery_info_from_name(name)
+        if not parsed:
+            continue
+        base = parsed["base_name"]
+        kind = parsed["recovery_type"]
+        # Only if no production-named container exists
+        if base in names:
+            continue
+        try:
+            state = container.attrs.get("State", {})
+            running = bool(state.get("Running"))
+        except DockerException:
+            continue
+        if kind == "old":
+            if not running:
+                continue
+            if _promote_temp_container(client, container, base, event_log, notify, "old"):
+                names.add(base)
+        elif kind == "new" and base not in bases_with_old:
+            if _promote_temp_container(client, container, base, event_log, notify, "new"):
+                names.add(base)
 
 
 def _reconcile_failed_upgrades(
@@ -1383,7 +1543,7 @@ def _reconcile_failed_upgrades(
         _UPGRADE_STATE_NOTIFIED.discard(container_id)
         # Clear backoff for both original tracked ID and current container ID
         with _STATE_LOCK:
-            for cid in {container_id, container.id}:
+            for cid in {container_id, container.id, resolved_name}:
                 if cid:
                     _RESTART_BACKOFF.pop(cid, None)
                     _RESTART_FAIL_COUNT.pop(cid, None)
@@ -1849,18 +2009,24 @@ def restart_container(
         # Step 9: Reset failure counters on success
         if container.id:
             with _STATE_LOCK:
-                _RESTART_FAIL_COUNT.pop(container.id, None)
-                _RESTART_BACKOFF.pop(container.id, None)
+                for key in {container.id, state.original_name}:
+                    if key:
+                        _RESTART_FAIL_COUNT.pop(key, None)
+                        _RESTART_BACKOFF.pop(key, None)
 
-        if post_update_hook:
-            _run_lifecycle_hook(
-                client,
-                container,
-                post_update_hook,
-                post_update_timeout or settings.hook_timeout_seconds,
-                event_log,
-                "post-update",
-            )
+        if post_update_hook and state.new_id:
+            try:
+                new_container = client.containers.get(state.new_id)
+                _run_lifecycle_hook(
+                    client,
+                    new_container,
+                    post_update_hook,
+                    post_update_timeout or settings.hook_timeout_seconds,
+                    event_log,
+                    "post-update",
+                )
+            except DockerException as hook_err:
+                LOG.warning("Could not run post-update hook on new container: %s", hook_err)
 
         # Step 10: Complete upgrade tracking if this was an upgrade
         if is_upgrade and upgrade_state and container.id:
@@ -2086,20 +2252,6 @@ def run_once(
     current_time = timestamp or now_utc()
     _metric_increment("scans_total")
 
-    # Check for stalled upgrades first
-    try:
-        _recover_stalled_upgrades(client, settings, [], _should_notify(settings, "restart"))
-    except Exception as error:
-        LOG.warning("Upgrade recovery failed: %s", error)
-
-    # Check for upgrades that may need manual intervention
-    try:
-        _check_for_manual_intervention(
-            client, settings, [], _should_notify(settings, "restart")
-        )
-    except Exception as error:
-        LOG.warning("Manual intervention check failed: %s", error)
-
     prune_due = _prune_due(settings, current_time)
     monitored = (
         containers
@@ -2109,6 +2261,20 @@ def run_once(
     monitored = _order_by_compose(monitored, settings)
     _track_new_containers(monitored)
     event_log: list[str] = []
+
+    # Check for stalled upgrades first
+    try:
+        _recover_stalled_upgrades(client, settings, event_log, _should_notify(settings, "restart"))
+    except Exception as error:
+        LOG.warning("Upgrade recovery failed: %s", error)
+
+    # Check for upgrades that may need manual intervention
+    try:
+        _check_for_manual_intervention(
+            client, settings, event_log, _should_notify(settings, "restart")
+        )
+    except Exception as error:
+        LOG.warning("Manual intervention check failed: %s", error)
     hostname = gethostname()
     _metric_increment("containers_scanned", len(monitored))
     rolling_seen: set[Optional[str]] = set()
@@ -2250,6 +2416,15 @@ def run_once(
                             event_log.append(
                                 f"Update available for {container.name} but no-restart enabled"
                             )
+                    elif not _restart_allowed(container.id, base_name, current_time, settings):
+                        LOG.info("Update for %s deferred; restart backoff active", container.name)
+                        if notify_update:
+                            with _STATE_LOCK:
+                                backoff_until = _RESTART_BACKOFF.get(container.id) or _RESTART_BACKOFF.get(base_name)
+                            if backoff_until is not None:
+                                _notify_restart_backoff(
+                                    container.name, container.id, backoff_until, event_log, settings,
+                                )
                     else:
                         if _supports_is_upgrade(restart_container):
                             ok = restart_container(
@@ -2315,7 +2490,7 @@ def run_once(
                         or _should_notify(settings, "health")
                     ):
                         with _STATE_LOCK:
-                            backoff_until = _RESTART_BACKOFF.get(container.id)
+                            backoff_until = _RESTART_BACKOFF.get(container.id) or _RESTART_BACKOFF.get(base_name)
                         if backoff_until is not None:
                             _notify_restart_backoff(
                                 container.name,
@@ -2413,7 +2588,7 @@ def run_once(
                         or _should_notify(settings, "health")
                     ):
                         with _STATE_LOCK:
-                            backoff_until = _RESTART_BACKOFF.get(container.id)
+                            backoff_until = _RESTART_BACKOFF.get(container.id) or _RESTART_BACKOFF.get(base_name)
                         if backoff_until is not None:
                             _notify_restart_backoff(
                                 container.name,
