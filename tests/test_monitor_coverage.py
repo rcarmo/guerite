@@ -409,6 +409,7 @@ class TestPruneDue:
         """Reset cron invalid flag."""
         from guerite import monitor
         monitor._PRUNE_CRON_INVALID = False
+        monitor._LAST_PRUNE = None
 
     def test_returns_false_when_no_cron(self):
         """Return False when no prune cron is set."""
@@ -423,6 +424,14 @@ class TestPruneDue:
         settings.prune_cron = "* * * * *"  # Every minute
         now = datetime.now(timezone.utc)
         assert _prune_due(settings, now) is True
+
+    def test_returns_false_when_called_twice_in_same_minute(self):
+        """Return False for duplicate prune checks in the same minute."""
+        settings = Mock()
+        settings.prune_cron = "* * * * *"  # Every minute
+        now = datetime(2025, 6, 15, 14, 30, 10, tzinfo=timezone.utc)
+        assert _prune_due(settings, now) is True
+        assert _prune_due(settings, now) is False
 
     def test_returns_false_when_cron_invalid(self):
         """Return False when cron expression is invalid."""

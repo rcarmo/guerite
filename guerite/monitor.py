@@ -46,6 +46,7 @@ _HEALTH_BACKOFF: dict[str, datetime] = {}
 _HEALTH_BACKOFF_LOADED = False
 _NO_HEALTH_WARNED: set[str] = set()
 _PRUNE_CRON_INVALID = False
+_LAST_PRUNE: Optional[datetime] = None
 _KNOWN_CONTAINERS: set[str] = set()
 _KNOWN_CONTAINER_NAMES: set[str] = set()
 _KNOWN_INITIALIZED = False
@@ -55,6 +56,7 @@ _LAST_DETECT_NOTIFY: Optional[datetime] = None
 _GUERITE_CREATED: set[str] = set()
 _RESTART_BACKOFF: dict[str, datetime] = {}
 _RESTART_FAIL_COUNT: dict[str, int] = {}
+_RESTART_FAIL_ACTION: dict[str, str] = {}
 _BACKOFF_NOTIFIED: set[str] = set()
 _LAST_ACTION: dict[str, datetime] = {}
 _IN_FLIGHT: set[str] = set()
@@ -589,6 +591,36 @@ def _restart_allowed(
     return False
 
 
+def _pending_retry_action(
+    container: Container, base_name: str, now: datetime, settings: Settings
+) -> Optional[str]:
+    container_id = container.id
+    if not container_id:
+        return None
+    with _STATE_LOCK:
+        action = _RESTART_FAIL_ACTION.get(container_id) or _RESTART_FAIL_ACTION.get(
+            base_name
+        )
+    if action not in {"update", "recreate"}:
+        return None
+    labels = container.labels or {}
+    if action == "update" and settings.update_label not in labels:
+        with _STATE_LOCK:
+            for key in {container_id, base_name}:
+                if key:
+                    _RESTART_FAIL_ACTION.pop(key, None)
+        return None
+    if action == "recreate" and settings.recreate_label not in labels:
+        with _STATE_LOCK:
+            for key in {container_id, base_name}:
+                if key:
+                    _RESTART_FAIL_ACTION.pop(key, None)
+        return None
+    if not _restart_allowed(container_id, base_name, now, settings):
+        return None
+    return action
+
+
 def _notify_restart_backoff(
     container_name: str,
     container_id: str,
@@ -660,6 +692,7 @@ def _register_restart_failure(
     event_log: list[str],
     settings: Settings,
     error: Exception,
+    action: Optional[str] = None,
 ) -> None:
     with _STATE_LOCK:
         fail_key = original_name or container_id
@@ -667,6 +700,8 @@ def _register_restart_failure(
         for key in {container_id, original_name}:
             if key:
                 _RESTART_FAIL_COUNT[key] = fail_count
+                if action:
+                    _RESTART_FAIL_ACTION[key] = action
     backoff_seconds = min(settings.health_backoff_seconds * max(1, fail_count), 3600)
     if fail_count >= settings.restart_retry_limit:
         backoff_seconds = max(
@@ -772,6 +807,7 @@ def _clean_cron_expression(value: Optional[str]) -> Optional[str]:
 
 
 def _prune_due(settings: Settings, timestamp: datetime) -> bool:
+    global _LAST_PRUNE
     global _PRUNE_CRON_INVALID
     cron_expression = _clean_cron_expression(settings.prune_cron)
     if not cron_expression:
@@ -780,7 +816,17 @@ def _prune_due(settings: Settings, timestamp: datetime) -> bool:
         if _PRUNE_CRON_INVALID:
             return False
     try:
-        return croniter.match(cron_expression, timestamp)
+        if not croniter.match(cron_expression, timestamp):
+            return False
+        fields = cron_expression.split()
+        prune_tick = timestamp.replace(microsecond=0)
+        if len(fields) < 6:
+            prune_tick = prune_tick.replace(second=0)
+        with _STATE_LOCK:
+            if _LAST_PRUNE == prune_tick:
+                return False
+            _LAST_PRUNE = prune_tick
+        return True
     except (ValueError, KeyError) as error:
         LOG.warning("Invalid prune cron expression %s: %s", cron_expression, error)
         with _STATE_LOCK:
@@ -1337,6 +1383,7 @@ def _recover_stalled_upgrades(
                     if key:
                         _RESTART_BACKOFF.pop(key, None)
                         _RESTART_FAIL_COUNT.pop(key, None)
+                        _RESTART_FAIL_ACTION.pop(key, None)
             _clear_tracked_upgrade_state(container_id)
         else:
             LOG.error(
@@ -1547,6 +1594,7 @@ def _reconcile_failed_upgrades(
                 if cid:
                     _RESTART_BACKOFF.pop(cid, None)
                     _RESTART_FAIL_COUNT.pop(cid, None)
+                    _RESTART_FAIL_ACTION.pop(cid, None)
 
 
 def _check_for_manual_intervention(
@@ -1835,6 +1883,7 @@ def restart_container(
     event_log: list[str],
     notify: bool,
     is_upgrade: bool = False,
+    failure_action: Optional[str] = None,
     pre_update_hook: Optional[str] = None,
     post_update_hook: Optional[str] = None,
     pre_update_timeout: Optional[int] = None,
@@ -2013,6 +2062,7 @@ def restart_container(
                     if key:
                         _RESTART_FAIL_COUNT.pop(key, None)
                         _RESTART_BACKOFF.pop(key, None)
+                        _RESTART_FAIL_ACTION.pop(key, None)
 
         if post_update_hook and state.new_id:
             try:
@@ -2073,7 +2123,13 @@ def restart_container(
         # Register failure for backoff
         if container.id:
             _register_restart_failure(
-                container.id, state.original_name, notify, event_log, settings, error
+                container.id,
+                state.original_name,
+                notify,
+                event_log,
+                settings,
+                error,
+                action=failure_action,
             )
 
         # Mark upgrade as failed if this was an upgrade
@@ -2334,6 +2390,19 @@ def run_once(
             restart_due = _cron_matches(container, settings.restart_label, current_time)
             recreate_due = _cron_matches(container, settings.recreate_label, current_time)
             health_due = _cron_matches(container, settings.health_label, current_time)
+            retry_action = None
+            if not any([update_due, restart_due, recreate_due, health_due]):
+                retry_action = _pending_retry_action(
+                    container, base_name, current_time, settings
+                )
+                if retry_action == "update":
+                    update_due = True
+                elif retry_action == "recreate":
+                    recreate_due = True
+                if retry_action:
+                    LOG.info(
+                        "Retrying %s after failed %s", container.name, retry_action
+                    )
             if (update_due or recreate_due or health_due) and _is_swarm_managed(container):
                 LOG.warning(
                     "Skipping %s; swarm-managed containers may lose secrets/configs if recreated",
@@ -2436,6 +2505,7 @@ def run_once(
                                 event_log,
                                 notify_update,
                                 is_upgrade=True,
+                                failure_action="update",
                                 pre_update_hook=pre_update if settings.lifecycle_hooks_enabled else None,
                                 post_update_hook=post_update if settings.lifecycle_hooks_enabled else None,
                                 pre_update_timeout=pre_update_timeout,
@@ -2450,6 +2520,7 @@ def run_once(
                                 settings,
                                 event_log,
                                 notify_update,
+                                failure_action="update",
                                 pre_update_hook=pre_update if settings.lifecycle_hooks_enabled else None,
                                 post_update_hook=post_update if settings.lifecycle_hooks_enabled else None,
                                 pre_update_timeout=pre_update_timeout,
@@ -2524,6 +2595,7 @@ def run_once(
                     settings,
                     event_log,
                     notify_recreate,
+                    failure_action="recreate",
                     pre_update_hook=pre_update if settings.lifecycle_hooks_enabled else None,
                     post_update_hook=post_update if settings.lifecycle_hooks_enabled else None,
                     pre_update_timeout=pre_update_timeout,
@@ -2557,6 +2629,13 @@ def run_once(
                 image_id = current_image_id(container)
                 try:
                     container.restart()
+                    if container.id:
+                        with _STATE_LOCK:
+                            for key in {container.id, container.name}:
+                                if key:
+                                    _RESTART_FAIL_COUNT.pop(key, None)
+                                    _RESTART_BACKOFF.pop(key, None)
+                                    _RESTART_FAIL_ACTION.pop(key, None)
                     if notify_restart:
                         event_log.append(
                             f"Restarted {container.name} (scheduled restart) ({_image_display_name(image_ref=image_ref)})"
@@ -2576,6 +2655,7 @@ def run_once(
                         event_log,
                         settings,
                         error,
+                        action="restart",
                     )
                 continue
 
@@ -2620,6 +2700,7 @@ def run_once(
                     settings,
                     event_log,
                     notify_event,
+                    failure_action="health",
                     pre_update_hook=pre_update if settings.lifecycle_hooks_enabled else None,
                     post_update_hook=post_update if settings.lifecycle_hooks_enabled else None,
                     pre_update_timeout=pre_update_timeout,

@@ -177,6 +177,7 @@ def reset_monitor_state():
     monitor._RESTART_BACKOFF.clear()
     monitor._HEALTH_BACKOFF.clear()
     monitor._RESTART_FAIL_COUNT.clear()
+    monitor._RESTART_FAIL_ACTION.clear()
     monitor._KNOWN_CONTAINERS.clear()
     monitor._KNOWN_CONTAINER_NAMES.clear()
     monitor._KNOWN_INITIALIZED = False
@@ -189,6 +190,7 @@ def reset_monitor_state():
     monitor._RESTART_BACKOFF.clear()
     monitor._HEALTH_BACKOFF.clear()
     monitor._RESTART_FAIL_COUNT.clear()
+    monitor._RESTART_FAIL_ACTION.clear()
     monitor._KNOWN_CONTAINERS.clear()
     monitor._KNOWN_CONTAINER_NAMES.clear()
     monitor._KNOWN_INITIALIZED = False

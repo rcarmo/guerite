@@ -11,9 +11,11 @@ from urllib3.exceptions import ReadTimeoutError
 from guerite.config import load_settings
 from guerite.monitor import (
     pull_image,
+    _pending_retry_action,
     _register_restart_failure,
     _restart_allowed,
     _RESTART_FAIL_COUNT,
+    _RESTART_FAIL_ACTION,
     _RESTART_BACKOFF,
 )
 from guerite.utils import now_utc
@@ -187,6 +189,23 @@ class TestBackoffMechanism:
         # Should be allowed
         assert _restart_allowed(container_id, "test", now, settings)
 
+    def test_pending_retry_action_after_backoff(self):
+        """Return retry action when backoff expired and failure recorded."""
+        settings = load_settings()
+        now = now_utc()
+        container = MagicMock()
+        container.id = "test123"
+        container.name = "test-container"
+        container.labels = {settings.recreate_label: "* * * * *"}
+
+        _RESTART_FAIL_ACTION[container.id] = "recreate"
+        _RESTART_BACKOFF[container.id] = now - timedelta(seconds=1)
+
+        assert (
+            _pending_retry_action(container, container.name, now, settings)
+            == "recreate"
+        )
+
 
 class TestTimeoutConfigurationDefaults:
     """Test that default timeout configurations are reasonable for backoff scenarios."""
@@ -198,8 +217,8 @@ class TestTimeoutConfigurationDefaults:
         # Check that default values are reasonable
         assert settings.health_backoff_seconds == 300  # 5 minutes base backoff
         assert (
-            settings.health_check_timeout_seconds == 60
-        )  # 1 minute health check timeout
+            settings.health_check_timeout_seconds == 120
+        )  # 2 minute health check timeout
         assert settings.restart_retry_limit == 3  # 3 retries before extended backoff
 
         # These values should provide good balance between reliability and responsiveness

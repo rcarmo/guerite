@@ -65,16 +65,16 @@ def test_now_tz(caplog, tz, expect_warning):
         assert not caplog.messages
 
 
-def test_load_settings_prune_timeout_defaults_to_180(monkeypatch):
+def test_load_settings_prune_timeout_defaults_to_300(monkeypatch):
     monkeypatch.setenv("DOCKER_HOST", "unix://test")
     monkeypatch.delenv("GUERITE_PRUNE_TIMEOUT_SECONDS", raising=False)
     settings = load_settings()
-    assert settings.prune_timeout_seconds == 180
+    assert settings.prune_timeout_seconds == 300
 
 
 @pytest.mark.parametrize("env_value,expected", [
     ("300", 300),
-    ("not-an-int", 180),
+    ("not-an-int", 300),
     ("0", 0),  # 0 is now allowed (means no/default timeout)
 ])
 def test_load_settings_prune_timeout_values(monkeypatch, env_value, expected):
@@ -101,7 +101,7 @@ def test_prune_images_applies_and_restores_timeout(settings: Settings):
             self.api = DummyAPI()
             self.containers = DummyContainers()
 
-    prune_settings = Settings(**{**settings.__dict__, "prune_timeout_seconds": 180, "notifications": {"prune"}})
+    prune_settings = Settings(**{**settings.__dict__, "prune_timeout_seconds": 300, "notifications": {"prune"}})
     client = DummyClient()
     event_log: list[str] = []
     monitor.prune_images(client, prune_settings, event_log, notify=False)
