@@ -82,6 +82,14 @@ def _format_metrics(metrics: dict[str, int]) -> str:
     ) + "\n"
 
 
+def _format_reclaimed_space(reclaimed: int | float) -> str:
+    gib = 1024 ** 3
+    mib = 1024 ** 2
+    if reclaimed >= gib:
+        return f"{reclaimed / gib:.2f} GB"
+    return f"{reclaimed / mib:.2f} MB"
+
+
 class HttpServer:
     def __init__(
         self,
@@ -2227,14 +2235,19 @@ def prune_images(
         images_deleted = (
             result.get("ImagesDeleted") if isinstance(result, dict) else None
         )
+        reclaimed_formatted = (
+            _format_reclaimed_space(reclaimed)
+            if isinstance(reclaimed, (int, float))
+            else reclaimed
+        )
         LOG.info(
-            "Pruned images; reclaimed %s bytes; deleted %s entries",
-            reclaimed,
+            "Pruned images; reclaimed %s; deleted %s entries",
+            reclaimed_formatted,
             len(images_deleted or []),
         )
         if notify:
             summary = "Pruned images" + (
-                f"; reclaimed {reclaimed} bytes" if reclaimed is not None else ""
+                f"; reclaimed {reclaimed_formatted}" if reclaimed is not None else ""
             )
             event_log.append(summary)
             if images_deleted:

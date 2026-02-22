@@ -297,7 +297,7 @@ def test_prune_success_logs(monkeypatch, restart_settings: Settings):
 
     def fake_prune_images(**kwargs):
         client.api.prune_images_called = True
-        return {"SpaceReclaimed": 123, "ImagesDeleted": ["sha256:abc"]}
+        return {"SpaceReclaimed": 5 * 1024 * 1024, "ImagesDeleted": ["sha256:abc"]}
 
     client.api.prune_images = fake_prune_images
     client.containers.list = lambda all=True: []
@@ -305,6 +305,7 @@ def test_prune_success_logs(monkeypatch, restart_settings: Settings):
     monitor.prune_images(client, restart_settings, event_log, notify=True)
     assert client.api.prune_images_called is True
     assert any("Pruned images" in entry for entry in event_log)
+    assert any("5.00 MB" in entry for entry in event_log)
 
 
 def test_prune_list_containers_failure(caplog, restart_settings: Settings):
