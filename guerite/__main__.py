@@ -8,6 +8,7 @@ from typing import Optional
 
 from docker import DockerClient
 from docker.errors import DockerException
+from requests.exceptions import RequestException
 
 from .config import Settings, load_settings
 from .monitor import (
@@ -142,7 +143,7 @@ def start_event_listener(
                         continue
                     LOG.info("Docker event %s for %s (%s); waking up", action, display, short_id)
                     wake_signal.set()
-            except DockerException as error:
+            except (DockerException, RequestException) as error:
                 LOG.warning("Event stream error: %s; retrying in %ss", error, backoff_seconds)
                 if client is None:
                     if event_client is not None:
