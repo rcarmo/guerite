@@ -1,6 +1,7 @@
 from datetime import datetime, timezone
+from logging import Formatter, StreamHandler, basicConfig, getLogger
+from time import gmtime
 from zoneinfo import ZoneInfo
-from logging import basicConfig, getLogger
 
 LOG_FORMAT = "%(asctime)s %(levelname)s %(message)s"
 LOG_DATE_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
@@ -8,7 +9,11 @@ LOG = getLogger(__name__)
 
 
 def configure_logging(level: str) -> None:
-    basicConfig(format=LOG_FORMAT, datefmt=LOG_DATE_FORMAT, level=level)
+    formatter = Formatter(LOG_FORMAT, LOG_DATE_FORMAT)
+    formatter.converter = gmtime
+    handler = StreamHandler()
+    handler.setFormatter(formatter)
+    basicConfig(handlers=[handler], level=level)
 
 
 def now_utc() -> datetime:
