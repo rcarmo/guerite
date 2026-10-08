@@ -63,7 +63,7 @@ def test_event_listener_respects_cooldown(monkeypatch, settings: Settings):
 @pytest.mark.parametrize("during_iteration", [False, True])
 @pytest.mark.parametrize("provided_client", [False, True])
 def test_event_listener_recovers_from_stream_errors(
-    monkeypatch, settings: Settings, error_type: type[Exception],
+    monkeypatch: pytest.MonkeyPatch, settings: Settings, error_type: type[Exception],
     during_iteration: bool, provided_client: bool,
 ) -> None:
     wake = Event()
@@ -111,7 +111,7 @@ def test_event_listener_recovers_from_stream_errors(
     recovered_client.events.assert_called_with(decode=True)
 
 
-def test_event_listener_retries_client_creation(monkeypatch, settings: Settings) -> None:
+def test_event_listener_retries_client_creation(monkeypatch: pytest.MonkeyPatch, settings: Settings) -> None:
     factory = Mock(side_effect=[ConnectionError("daemon unavailable")] * 6 + [RuntimeError("stop listener test")])
     thread = Mock()
     sleep = Mock()
