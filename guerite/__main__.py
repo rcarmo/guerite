@@ -8,12 +8,18 @@ from typing import Optional
 
 from docker import DockerClient
 from docker.errors import DockerException
+from requests.exceptions import (
+    ChunkedEncodingError,
+    ConnectionError,
+    ContentDecodingError,
+    Timeout,
+)
 
 from .config import Settings, load_settings
 from .monitor import (
+    HttpServer,
     _action_allowed,
     _strip_guerite_suffix,
-    HttpServer,
     next_prune_time,
     next_wakeup,
     run_once,
@@ -111,20 +117,33 @@ def start_event_listener(
     """Start a daemon thread that listens for Docker events.
     
     Uses a separate DockerClient instance for thread safety unless one is provided.
+    Caller-provided clients are reused and never closed by the listener.
     """
     def _run() -> None:
         backoff_seconds = 5
         max_backoff = 60
-        # Use provided client (for testing) or create a dedicated one
         event_client: Optional[DockerClient] = client
+
+        def close_safely(resource, description: str) -> None:
+            # Cleanup must not mask a stream failure or prevent reconnection.
+            try:
+                close = getattr(resource, "close", None)
+                if close is not None:
+                    close()
+            except Exception:
+                LOG.warning("Unable to close %s", description, exc_info=True)
+
         while True:
+            stream = None
             try:
                 if event_client is None:
                     event_client = DockerClient(base_url=settings.docker_host)
-                backoff_seconds = 5  # Reset on successful connection
-                for event in event_client.events(decode=True):
+                stream = event_client.events(decode=True)
+                for event in stream:
                     if not isinstance(event, dict):
                         continue
+                    # Client construction/opening alone does not prove recovery.
+                    backoff_seconds = 5  # Reset only after receiving a real event
                     if not is_monitored_event(event, settings):
                         continue
                     action = event.get("Action")
@@ -142,14 +161,26 @@ def start_event_listener(
                         continue
                     LOG.info("Docker event %s for %s (%s); waking up", action, display, short_id)
                     wake_signal.set()
-            except DockerException as error:
+                # The SDK can turn a broken socket into StopIteration. Treat EOF
+                # like a disconnect, including cleanup and a delay before retry.
+                LOG.warning("Event stream ended; retrying in %ss", backoff_seconds)
+            except (
+                DockerException,
+                ConnectionError,
+                Timeout,
+                ChunkedEncodingError,
+                ContentDecodingError,
+            ) as error:
                 LOG.warning("Event stream error: %s; retrying in %ss", error, backoff_seconds)
+            finally:
+                if stream is not None:
+                    close_safely(stream, "Docker event stream")
                 if client is None:
-                    if event_client is not None:
-                        event_client.close()
-                    event_client = None  # Force reconnection on next iteration (only if we created it)
-                sleep(backoff_seconds)
-                backoff_seconds = min(backoff_seconds * 2, max_backoff)
+                    stale_client, event_client = event_client, None
+                    if stale_client is not None:
+                        close_safely(stale_client, "Docker event client")
+            sleep(backoff_seconds)
+            backoff_seconds = min(backoff_seconds * 2, max_backoff)
 
     thread = Thread(target=_run, daemon=True)
     thread.start()
